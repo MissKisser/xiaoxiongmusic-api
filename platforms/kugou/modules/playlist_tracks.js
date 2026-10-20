@@ -8,11 +8,19 @@
  * 语义：写入 → 读回确认 → 才返回成功。加歌后重新读一次歌单歌曲确认新歌已
  * 在列表中，删歌后确认目标歌曲已不在列表中；读回结果与预期不符时返回失败
  * 且不自动重试。
+ *
+ * 歌名口径：写侧发**纯歌名**（剥离歌手前缀与音频扩展名），与读侧
+ * `playlist_detail.js` 展示的歌名一致。剥离规则统一由 `../core/song_title`
+ * 提供，写侧、云歌单读侧、公开歌单三处共用同一实现。实测服务端对 name 只做
+ * 非空校验——纯歌名、完整格式、完整格式去扩展名三种写法都返回 error_code=0，
+ * 且入库的 name 一律被服务端改写成酷狗自己的「歌手 - 歌名.mp3」规范名，所以写侧用
+ * 纯歌名是口径统一的选择，不是因为服务端强制。
  */
 
 const { kgGatewayRequest } = require('../core/request')
 const { readSession } = require('../core/session')
 const { KG_CLOUDLIST_ROUTER } = require('../core/config')
+const { extractSongTitle, extractEntryTitle } = require('../core/song_title')
 const {
   success,
   badRequest,
@@ -30,18 +38,23 @@ const MAX_TRACKS = 200
 
 /**
  * 归一化歌曲条目
+ *
+ * 歌名按写侧口径剥离成纯歌名：去掉歌手前缀与音频扩展名，与读侧展示一致。
  * @param {any} song 原始歌曲条目
  * @returns {{ hash: string, name: string, albumId: number, mixsongId: number, fileId: string }} 归一化结果
  */
-const normalizeSong = (song) => ({
-  hash: String(song.hash || '')
-    .trim()
-    .toUpperCase(),
-  name: String(song.name || '').trim(),
-  albumId: Number(song.album_id || 0),
-  mixsongId: Number(song.mixsongid || 0),
-  fileId: String(song.fileid || ''),
-})
+const normalizeSong = (song) => {
+  const rawName = String(song.name || '').trim()
+  return {
+    hash: String(song.hash || '')
+      .trim()
+      .toUpperCase(),
+    name: extractEntryTitle(song, { nameFields: ['name'] }) || rawName,
+    albumId: Number(song.album_id || 0),
+    mixsongId: Number(song.mixsongid || 0),
+    fileId: String(song.fileid || ''),
+  }
+}
 
 /**
  * 往歌单加歌 / 从歌单删歌
@@ -62,8 +75,9 @@ module.exports = async (query = {}) => {
   if (songs.some((song) => !song.hash)) {
     return badRequest('songs 中存在缺少 hash 的条目')
   }
-  // 酷狗加歌接口要求携带歌名，歌名为空会被服务端以 error_code=20010 拒绝
-  if (songs.some((song) => !song.name)) {
+  // 酷狗加歌接口要求携带歌名，歌名为空会被服务端以 error_code=20010 拒绝；
+  // 删歌按 hash 定位目标歌曲，不需要歌名
+  if (op === 'add' && songs.some((song) => !song.name)) {
     return badRequest('songs 中存在缺少 name 的条目')
   }
 
@@ -254,3 +268,5 @@ module.exports = async (query = {}) => {
     verified: true,
   })
 }
+
+module.exports.extractSongTitle = extractSongTitle

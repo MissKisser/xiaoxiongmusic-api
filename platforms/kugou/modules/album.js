@@ -10,6 +10,10 @@
  *
  * 网关的专辑歌曲接口对当前客户端会返回 `error_code=20010`，因此歌曲列表
  * 统一走 mobilecdn 兜底；专辑元信息优先取网关，失败时回落到 mobilecdn。
+ *
+ * 专辑名只由专辑详情接口提供：网关为 `album_name`，mobilecdn 为
+ * `albumname`；歌曲条目本身不带专辑名（只有 `album_id`），因此歌曲的
+ * 专辑名统一取所属专辑详情。
  */
 
 const { kgGatewayRequest, kgRequest, kgErrorCode } = require('../core/request')
@@ -57,6 +61,22 @@ const fillCover = (url, size = 300) => {
 }
 
 /**
+ * 从歌曲条目里取专辑名
+ *
+ * 各端点的专辑名字段并不统一：网关为 `album_info.album_name`，云歌单为
+ * `albuminfo.name`，而 mobilecdn 的专辑歌曲条目完全不带专辑名（只有
+ * `album_id`），此时要回落到专辑详情给出的专辑名。
+ * @param {any} raw 原始歌曲条目
+ * @returns {string} 专辑名，取不到时返回空串
+ */
+const pickAlbumName = (raw) => {
+  const info = raw.albuminfo || raw.album_info || {}
+  const candidate =
+    raw.album_name || raw.albumname || info.name || info.album_name || ''
+  return decodeName(candidate)
+}
+
+/**
  * 把音质 hash 与体积整理成对外结构
  * @param {any} raw 原始歌曲条目
  * @returns {{ qualities: string[], hashes: Record<string, string>, sizes: Record<string, number> }} 音质信息
@@ -91,9 +111,10 @@ const collectQualities = (raw) => {
  * 归一化 mobilecdn 专辑歌曲
  * @param {any} raw 原始歌曲条目
  * @param {string} fallbackCover 兜底封面模板
+ * @param {string} fallbackAlbumName 兜底专辑名
  * @returns {any} 对外歌曲对象
  */
-const normalizeMobileSong = (raw, fallbackCover) => {
+const normalizeMobileSong = (raw, fallbackCover, fallbackAlbumName) => {
   const trans = raw.trans_param || {}
   const coverTemplate = trans.union_cover || fallbackCover
   const interval = Number(raw.duration || 0)
@@ -111,13 +132,15 @@ const normalizeMobileSong = (raw, fallbackCover) => {
     id: String(raw.audio_id || raw.hash || ''),
     audioId: Number(raw.audio_id || 0),
     albumAudioId: Number(raw.album_audio_id || 0),
+    /** 歌曲主键（album_audio_id 口径），查评论、签播放地址都用它 */
+    mixSongId: String(raw.album_audio_id || ''),
     hash: raw.hash || '',
     name: songName,
     artist: artistName,
     artists: artistName
       ? artistName.split(' / ').map((name) => ({ id: '', name }))
       : [],
-    album: decodeName(raw.album_name),
+    album: pickAlbumName(raw) || fallbackAlbumName,
     albumId: String(raw.album_id || ''),
     cover: fillCover(coverTemplate, 300),
     coverOriginal: fillCover(coverTemplate, 480),
@@ -140,9 +163,10 @@ const normalizeMobileSong = (raw, fallbackCover) => {
  * 归一化网关专辑歌曲
  * @param {any} raw 原始歌曲条目
  * @param {string} fallbackCover 兜底封面模板
+ * @param {string} fallbackAlbumName 兜底专辑名
  * @returns {any} 对外歌曲对象
  */
-const normalizeGatewaySong = (raw, fallbackCover) => {
+const normalizeGatewaySong = (raw, fallbackCover, fallbackAlbumName) => {
   const base = raw.base || {}
   const audio = raw.audio_info || {}
   const albumInfo = raw.album_info || {}
@@ -171,6 +195,8 @@ const normalizeGatewaySong = (raw, fallbackCover) => {
     id: String(base.audio_id || audio.hash || ''),
     audioId: Number(base.audio_id || 0),
     albumAudioId: Number(base.album_audio_id || 0),
+    /** 歌曲主键（album_audio_id 口径），查评论、签播放地址都用它 */
+    mixSongId: String(base.album_audio_id || ''),
     hash: audio.hash_128 || audio.hash || '',
     name: decodeName(base.audio_name),
     artist: artistName,
@@ -180,7 +206,7 @@ const normalizeGatewaySong = (raw, fallbackCover) => {
           name: decodeName(author.author_name),
         }))
       : [{ id: '', name: artistName }],
-    album: decodeName(albumInfo.album_name),
+    album: pickAlbumName(raw) || fallbackAlbumName,
     albumId: String(base.album_id || ''),
     cover: fillCover(coverTemplate, 300),
     coverOriginal: fillCover(coverTemplate, 480),
@@ -363,15 +389,19 @@ module.exports = async (query = {}) => {
       )
     : decodeName(detail.singername)
 
-  const normalized = songs.map((song) =>
-    songsAreGateway
-      ? normalizeGatewaySong(song, coverTemplate)
-      : normalizeMobileSong(song, coverTemplate),
-  )
-
-  const name = detailIsGateway
+  // 专辑名只有详情接口提供（歌曲条目不带），网关为 `album_name`，
+  // mobilecdn 为 `albumname`
+  const albumName = detailIsGateway
     ? decodeName(detail.album_name)
     : decodeName(detail.albumname)
+
+  const normalized = songs.map((song) =>
+    songsAreGateway
+      ? normalizeGatewaySong(song, coverTemplate, albumName)
+      : normalizeMobileSong(song, coverTemplate, albumName),
+  )
+
+  const name = albumName
 
   return success({
     code: 200,

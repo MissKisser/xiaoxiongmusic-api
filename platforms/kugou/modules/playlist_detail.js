@@ -5,11 +5,15 @@
  *
  * 除对外处理函数外，本模块还导出同目录写操作模块复用的内部工具 readListSongs，
  * 供加歌、删歌后的读回校验复用同一套协议细节。
+ *
+ * 歌名口径：歌名剥离规则由 `../core/song_title` 统一提供，与公开歌单、加歌
+ * 写入三处共用同一实现，同一首歌在任何页面显示的都是同一个名字。
  */
 
 const { kgGatewayRequest } = require('../core/request')
 const { readSession } = require('../core/session')
 const { KG_CLOUDLIST_ROUTER } = require('../core/config')
+const { extractEntryTitle } = require('../core/song_title')
 const {
   success,
   badRequest,
@@ -70,19 +74,58 @@ const readListSongs = async (
   }
 }
 
+/** 封面链接里尺寸占位符 `{size}` 的替换值 */
+const COVER_SIZE = 300
+
+/**
+ * 从歌曲条目里取出纯歌名
+ *
+ * 云歌单端点返回的条目没有 `songname` / `filename`，歌名混在 `name` 里，
+ * 形态为 `歌手A、歌手B - 歌名.mp3`。剥离规则由 `../core/song_title` 统一提供，
+ * 与公开歌单、加歌写入共用同一实现。
+ * @param {any} song 酷狗歌曲条目
+ * @returns {string} 歌名，取不到时返回空串
+ */
+const extractSongName = (song) =>
+  extractEntryTitle(song, { nameFields: ['name'] })
+
+/**
+ * 从歌曲条目里取专辑名
+ *
+ * 云歌单端点把专辑信息放在 `albuminfo` 对象里，兼容旧形态的 `album_name`。
+ * @param {any} song 酷狗歌曲条目
+ * @returns {string} 专辑名，取不到时返回空串
+ */
+const extractAlbumName = (song) => {
+  const info = song.albuminfo
+  if (info && typeof info === 'object' && info.name) return String(info.name)
+  return String(song.album_name || '')
+}
+
 /**
  * 把歌曲条目映射为对外结构
+ *
+ * 字段口径说明：
+ * - `id` 是**内容哈希**（hash），不是酷狗的歌曲主键；歌曲主键是 `mixSongId`。
+ * - `albumId` 是**专辑 ID**；`albumAudioId` 是 album_audio_id 口径（与 `mixSongId`
+ *   同值），签播放地址要的是后者。
  * @param {any} song 酷狗歌曲条目
  * @returns {any} 对外歌曲对象
  */
 const mapSong = (song) => {
   const singerinfo = Array.isArray(song.singerinfo) ? song.singerinfo : []
+  const coverOriginal = String(song.cover || '')
   return {
+    /** 内容哈希（不是歌曲主键，歌曲主键见 `mixSongId`） */
     id: String(song.hash || ''),
     hash: song.hash || '',
     fileid: String(song.fileid || ''),
     audioId: song.audio_id || 0,
-    name: song.songname || song.filename || '',
+    /** 歌曲主键（album_audio_id 口径），查评论、签播放地址都用它 */
+    mixSongId: String(song.mixsongid || ''),
+    /** 歌曲主键的数字形态，语义与 `mixSongId` 相同 */
+    albumAudioId: Number(song.mixsongid || 0),
+    name: extractSongName(song),
     artist:
       song.singername ||
       singerinfo
@@ -93,9 +136,15 @@ const mapSong = (song) => {
       id: String(singer.id || ''),
       name: singer.name || '',
     })),
-    album: song.album_name || '',
+    album: extractAlbumName(song),
+    /** 专辑 ID（不是 album_audio_id） */
     albumId: String(song.album_id || ''),
-    duration: song.duration || 0,
+    /** 封面链接，尺寸占位符已替换为 300 */
+    cover: coverOriginal.replace(/\{size\}/g, String(COVER_SIZE)),
+    /** 未替换尺寸占位符的原始封面链接 */
+    coverOriginal,
+    /** 时长（毫秒） */
+    duration: Number(song.timelen || song.duration || 0),
     payType: song.media_pay_type || 0,
     language: song.language || '',
     publishDate: song.publish_date || '',
