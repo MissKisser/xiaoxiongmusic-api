@@ -23,8 +23,9 @@ docs/
 | 酷狗云歌单写协议规格 | `xiaoxiongmusic/docs/ops/KUGOU-WRITE-PROTOCOL.md` | 酷狗三套写协议（网关签名 / 云歌单 `key`+`p` 双因子 / 老协议）的精确口径与错误码语义标定表 |
 | 3.x 三平台模块结构地图 | `xiaoxiongmusic/docs/ops/PLATFORM-MODULE-MAP.md` | 桌面端侧的平台能力代码地图 |
 | 网易云后端来源调查 | `xiaoxiongmusic/docs/ops/NETEASE-BACKEND-PROVENANCE.md` | 网易云后端来源、两端版本差异、适配层分叉现状 |
-| 上游扩展机制勘察 | `xiaoxiongmusic/.apiadv/API-ENHANCED-EXTENSION-MAP.md` | 上游 `main.js` / `server.js` 的模块加载与导出机制实证 |
-| 服务端仓库勘察 | `xiaoxiongmusic/.srvscan/SERVER-REPO-MAP.md` | `xiaoxiongmusic-server` 的目录职责、账号体系、可搬迁性分析 |
+| 服务端仓库勘察 | `xiaoxiongmusic/docs/ops/SERVER-REPO-MAP.md` | `xiaoxiongmusic-server` 的目录职责、账号体系、可搬迁性分析 |
+| 平台能力可搬迁性勘察 | `xiaoxiongmusic/docs/ops/PLATFORM-PORTABILITY.md` | 3.x 侧 QQ / 酷狗能力搬到后端的技术评估：哪些可直接复制、状态作用域的改造点、多端共享登录态是否成立 |
+| 上游扩展机制 | 本目录 `PLATFORM-EXTENSION-DESIGN.md` 第四节 | 上游 `main.js` / `server.js` 的模块加载与导出机制、为何平台层要独立目录 |
 
 ## 约定
 
