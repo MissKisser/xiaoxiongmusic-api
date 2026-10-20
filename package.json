@@ -1,7 +1,7 @@
 {
-  "name": "@neteasecloudmusicapienhanced/api",
+  "name": "xiaoxiongmusic-api",
   "version": "4.41.1",
-  "description": "全网最全的网易云音乐API接口 || A revival project for NeteaseCloudMusicApi Node.js Services (Half Refactor & Enhanced)",
+  "description": "小熊音乐三平台接口层 —— 网易云 / QQ 音乐 / 酷狗音乐。派生自 NeteaseCloudMusicApiEnhanced/api-enhanced（MIT），在保留网易云接口的同时新增 QQ 音乐与酷狗音乐平台能力。",
   "scripts": {
     "dev": "nodemon app.js",
     "start": "node app.js",
@@ -13,11 +13,12 @@
     "docs:check": "node scripts/format-docs.js --check",
     "pkgwin": "node scripts/build-pkg.js . -t node18-win-x64 -C GZip -o precompiled/app",
     "pkglinux": "node scripts/build-pkg.js . -t node18-linux-x64 -C GZip -o precompiled/app",
-    "pkgmacos": "node scripts/build-pkg.js . -t node18-macos-x64 -C GZip -o precompiled/app"
+    "pkgmacos": "node scripts/build-pkg.js . -t node18-macos-x64 -C GZip -o precompiled/app",
+    "start:platforms": "node app-multi.js"
   },
   "bin": "./app.js",
   "pkg": {
-    "scripts": "module/*.js",
+    "scripts": "module/*.js platforms/**/*.js",
     "assets": [
       "node_modules/axios",
       "node_modules/express",
@@ -32,7 +33,9 @@
       "node_modules/vm2",
       "module",
       "public",
-      "data"
+      "data",
+      "platforms",
+      "platforms.js"
     ]
   },
   "keywords": [
@@ -52,7 +55,7 @@
   },
   "homepage": "https://neteasecloudmusicapienhanced.js.org/",
   "engines": {
-    "node": ">=12"
+    "node": ">=18"
   },
   "lint-staged": {
     "*.js": [
@@ -72,7 +75,11 @@
     "server.js",
     "generateConfig.js",
     "public",
-    "data"
+    "data",
+    "platforms",
+    "platforms.js",
+    "app-multi.js",
+    "docs"
   ],
   "dependencies": {
     "@neteasecloudmusicapienhanced/unblockmusic-utils": "^0.4.5",
@@ -120,5 +127,8 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
-  }
+  },
+  "contributors": [
+    "MissKisser"
+  ]
 }

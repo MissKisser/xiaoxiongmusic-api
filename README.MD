@@ -1,3 +1,50 @@
+> [!IMPORTANT]
+> **本仓库是 `NeteaseCloudMusicApiEnhanced/api-enhanced` 的 fork**，在其基础上新增 **QQ 音乐**与**酷狗音乐**两个平台，
+> 构成「小熊音乐」的三平台接口层。
+>
+> - 上游项目：https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced （MIT，作者 MoeFurina）
+> - 原始项目：https://github.com/Binaryify/NeteaseCloudMusicApi （MIT，作者 Binaryify）
+> - 本 fork 保留了上游的 `LICENSE` 原文与原作者署名；平台层代码为本 fork 新增。
+> - **上游的自动发布流程已在本 fork 停用**（改 `package.json` 的 `version` 不会触发打 tag、发 Release、推 Docker 或 publish 到 npm）。
+> - 改造方案与平台层契约见 [`docs/PLATFORM-EXTENSION-DESIGN.md`](./docs/PLATFORM-EXTENSION-DESIGN.md)。
+
+---
+
+## 三平台接口层
+
+| 平台 | 路由前缀 | 能力 | 来源 |
+|---|---|---|---|
+| 网易云 | `/netease/*` | 440+ 接口（读 + 写） | 上游 `module/` |
+| QQ 音乐 | `/qqmusic/*` | 14 个模块（登录 / 读 / 写） | 本 fork `platforms/qqmusic/` |
+| 酷狗 | `/kugou/*` | 11 个模块（登录 / 读 / 写） | 本 fork `platforms/kugou/` |
+
+### 作为库使用
+
+```js
+// 网易云：与上游完全一致
+const netease = require('xiaoxiongmusic-api')
+await netease.playlist_detail({ id: 123 })
+
+// 平台：分组导出，路径以 /platforms 结尾
+const { qqmusic, kugou } = require('xiaoxiongmusic-api/platforms')
+await kugou.playlist_create({ name: '我的歌单', session: { token, userid } })
+```
+
+平台层是**无状态**的：凭据一律由调用方以参数传入，接口层不保存任何会话、不做跨请求缓存，
+因此多个账号共用同一个后端不会串号。
+
+### 独立启动
+
+```bash
+node app-multi.js      # 三平台一起服务（默认关闭响应缓存）
+node app.js            # 仅网易云（上游原生入口）
+```
+
+> 响应缓存说明：上游 apicache 的缓存键是 `hostname + url + cookies`，**不含 method 与请求体**，
+> 平台写接口同为 POST，同一 URL 下两次不同写入会命中同一条缓存。故 `app-multi.js` 默认关闭缓存；
+> 若确需保留，设 `KEEP_RESPONSE_CACHE=true`，并让写操作请求带上 `x-apicache-bypass: 1` 头。
+
+---
 <p align="center">
   <img src="./public/static/neteaselogo.png" alt="网易云音乐 API Enhanced Logo" />
 </p>

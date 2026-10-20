@@ -1,12 +1,12 @@
-name: Create Release on Version Change
+# 本 fork 已停用上游的自动发布流程。
+#
+# 该流程在 package.json 的 version 变化时会自动打 tag、发 GitHub Release、
+# 推送 Docker 镜像（moefurina/ncm-api 等非本仓库命名空间）并 pnpm publish 到 npm。
+# 在 fork 中触发会污染上游的发布渠道，因此所有 job 一律短路。
+# 保留本文件是为了合并上游时能直观看到这处差异。
+name: Create Release on Version Change (disabled in this fork)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - package.json
-
   workflow_dispatch:
 
 concurrency:
@@ -17,6 +17,7 @@ jobs:
   detect:
     name: Detect Version Change
     runs-on: ubuntu-latest
+    if: false
 
     outputs:
       version: ${{ steps.version.outputs.value }}
@@ -65,9 +66,7 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: detect
 
-    if: |
-      needs.detect.outputs.should_release == 'true' &&
-      needs.detect.outputs.tag_exists != 'true'
+    if: false
 
     runs-on: ${{ matrix.os }}
 
@@ -148,9 +147,7 @@ jobs:
       - detect
       - build
 
-    if: |
-      needs.detect.outputs.should_release == 'true' &&
-      needs.detect.outputs.tag_exists != 'true'
+    if: false
 
     runs-on: ubuntu-latest
 
@@ -235,9 +232,7 @@ jobs:
     name: Publish Docker Image
     needs: detect
 
-    if: |
-      needs.detect.outputs.should_release == 'true' &&
-      needs.detect.outputs.tag_exists != 'true'
+    if: false
 
     runs-on: ubuntu-latest
 
@@ -288,9 +283,7 @@ jobs:
     name: Publish to npm
     needs: detect
 
-    if: |
-      needs.detect.outputs.should_release == 'true' &&
-      needs.detect.outputs.tag_exists != 'true'
+    if: false
 
     runs-on: ubuntu-latest
 
