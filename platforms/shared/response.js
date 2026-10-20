@@ -12,7 +12,12 @@
  * @param {Record<string, any>} [extra] 追加字段
  * @returns {{ status: number, body: any, cookie: string[] }}
  */
-const success = (body, extra = {}) => ({ status: 200, body, cookie: [], ...extra })
+const success = (body, extra = {}) => ({
+  status: 200,
+  body,
+  cookie: [],
+  ...extra,
+})
 
 /**
  * 构造失败响应
