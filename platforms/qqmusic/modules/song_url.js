@@ -5,9 +5,11 @@
  * 按「首选档位 → 更低档位」的顺序取第一个命中的即为最高可用音质。
  *
  * 两个必须注意的点：
- * - vkey 的文件名前缀后面跟的是歌曲详情里的**媒体 mid**（`file.media_mid`），
- *   多数歌曲它与歌曲 mid 不同，取错就拿不到直链，因此先查一次歌曲详情。
- * - 付费 / VIP 歌曲对无权限账号一律返回空直链，此时返回 403 与明确原因。
+ * - vkey 的文件名形如 `{档位前缀}{base}{扩展名}`，base 取自候选列表：
+ *   首选**媒体 mid 单个**（`file.media_mid`），兜底**歌曲 mid×2**。
+ *   不能只用歌曲 mid 单个 —— 上游会回非空直链但实际下载 404。
+ * - 付费 / VIP 歌曲对无权限账号返回空直链，此时按失败原因分级返回
+ *   403 或 502，而不是笼统的「无法获取播放链接」。
  *
  * 返回体用 `available` 表达「有没有可播地址」，
  * `level` / `label` 表达音质档位，`isFallback` 表达是否降级。
@@ -29,6 +31,41 @@ const { createLogger } = require('../../shared/logger')
 const logger = createLogger('qqmusic')
 
 /**
+ * 失败原因到 HTTP 状态与文案的映射
+ *
+ * `need_pay` 与 `no_authorization` 都是「账号没权限」，区别在于歌曲本身是否付费，
+ * 前者要提示用户换歌或开通会员，后者提示账号状态异常。
+ * @type {Record<string, { status: number, message: string }>}
+ */
+const REASON_RESPONSES = {
+  need_pay: {
+    status: 403,
+    message: '该歌曲为付费歌曲，当前账号无播放权限',
+  },
+  no_authorization: {
+    status: 403,
+    message: '当前账号没有该歌曲的播放权限',
+  },
+  filename_rejected: {
+    status: 502,
+    message: '上游未接受播放文件名',
+  },
+  vkey_error: {
+    status: 502,
+    message: '上游播放凭证接口返回异常',
+  },
+}
+
+/**
+ * 未识别原因的兜底响应
+ * @type {{ status: number, message: string }}
+ */
+const DEFAULT_FAILURE = {
+  status: 502,
+  message: '上游播放凭证接口返回异常',
+}
+
+/**
  * 从歌曲详情响应中取出歌曲主体
  * @param {Record<string, any>} data 接口返回的数据段
  * @returns {Record<string, any> | null} 歌曲主体
@@ -43,10 +80,13 @@ const pickTrack = (data) => {
 }
 
 /**
- * 解析歌曲的 mid 与媒体 mid
+ * 解析歌曲的 mid、媒体 mid 与付费标记
+ *
+ * 付费标记来自同一次详情响应，不额外增加网络请求；它决定了失败原因
+ * 能否区分「歌曲需付费」与「免费歌却无授权」。
  * @param {string} value 歌曲 mid 或数字歌曲 ID
  * @param {{ uin: string, cookies: Record<string, string> } | null} session 登录凭据
- * @returns {Promise<{ mid: string, mediaMid: string }>} 歌曲标识
+ * @returns {Promise<{ mid: string, mediaMid: string, payPlay: number | undefined }>} 歌曲标识与付费标记
  */
 const resolveSong = async (value, session) => {
   const text = String(value).trim()
@@ -62,11 +102,20 @@ const resolveSong = async (value, session) => {
   )
 
   const track = pickTrack(detail)
-  if (!track) return { mid: text, mediaMid: '' }
+  if (!track) return { mid: text, mediaMid: '', payPlay: undefined }
+
+  const pay = track.pay || {}
+  const payPlay =
+    pay.pay_play !== undefined
+      ? Number(pay.pay_play)
+      : pay.payplay !== undefined
+        ? Number(pay.payplay)
+        : undefined
 
   return {
     mid: track.mid || text,
     mediaMid: (track.file && track.file.media_mid) || '',
+    payPlay,
   }
 }
 
@@ -90,14 +139,10 @@ module.exports = async (query = {}) => {
   const givenMediaMid = String(query.mediaMid ?? query.media_mid ?? '').trim()
 
   try {
-    let songMid = raw
-    let mediaMid = givenMediaMid
-
-    if (!mediaMid || /^\d+$/.test(raw)) {
-      const resolved = await resolveSong(raw, session)
-      songMid = resolved.mid || raw
-      mediaMid = mediaMid || resolved.mediaMid
-    }
+    // 详情请求同时提供 mid、媒体 mid 与付费标记，失败原因分级依赖付费标记
+    const resolved = await resolveSong(raw, session)
+    const songMid = resolved.mid || raw
+    const mediaMid = givenMediaMid || resolved.mediaMid
 
     const result = await requestSongUrl({
       mid: songMid,
@@ -105,16 +150,19 @@ module.exports = async (query = {}) => {
       level,
       uin,
       cookies,
+      payPlay: resolved.payPlay,
     })
 
     if (!result.ok) {
-      return failure(403, {
-        code: 403,
-        message: '无法获取播放链接，可能需要 VIP 或无版权',
+      const mapped = REASON_RESPONSES[result.reason] || DEFAULT_FAILURE
+      return failure(mapped.status, {
+        code: mapped.status,
+        message: mapped.message,
         mid: songMid,
         available: false,
         reason: result.reason,
         triedLevels: result.triedLevels || [],
+        vkeyResults: result.vkeyResults || [],
         raw: result.raw,
       })
     }
