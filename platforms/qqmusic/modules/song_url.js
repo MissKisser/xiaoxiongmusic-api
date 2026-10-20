@@ -12,7 +12,9 @@
  *   403 或 502，而不是笼统的「无法获取播放链接」。
  *
  * 返回体用 `available` 表达「有没有可播地址」，
- * `level` / `label` 表达音质档位，`isFallback` 表达是否降级。
+ * `level` / `label` 表达音质档位，`isFallback` 表达是否降级，
+ * `isTrial` 表达是否官方下发的试听片段，`payPlay` 表达歌曲付费标记，
+ * `reason` 表达失败原因分级。
  */
 
 const { qmRequest } = require('../core/request')
@@ -161,6 +163,8 @@ module.exports = async (query = {}) => {
         mid: songMid,
         available: false,
         reason: result.reason,
+        isTrial: false,
+        payPlay: resolved.payPlay,
         triedLevels: result.triedLevels || [],
         vkeyResults: result.vkeyResults || [],
         raw: result.raw,
@@ -175,6 +179,8 @@ module.exports = async (query = {}) => {
       label: result.label,
       format: result.format,
       isFallback: result.isFallback,
+      isTrial: result.isTrial,
+      payPlay: resolved.payPlay,
       triedLevels: result.triedLevels || [],
       raw: result.raw,
     })

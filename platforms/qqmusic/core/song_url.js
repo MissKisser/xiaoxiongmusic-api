@@ -20,6 +20,11 @@
  * - filename_rejected 上游未接受该文件名
  * - vkey_error        上游返回其它异常码，或没给出可用结果
  *
+ * 试听分支：正式音质全部拿不到直链时，再按 `RS02{媒体 mid}.mp3` 探一次，
+ * 付费歌会由官方下发 60 秒试听片段，命中时 `level` 为 `trial`、`isTrial` 为 true。
+ * 试听文件名的口径已实测定案：只用 `.mp3` 后缀、base 取单个媒体 mid
+ * （不能空格分隔多个 mid）、请求不带 `songid` 参数、匿名登录态同样可用。
+ *
  * 无状态约束：
  * - 凭据只从入参取，不持有任何模块级状态
  * - 每次请求独立生成 guid，不做跨请求缓存
@@ -38,6 +43,18 @@ const { sessionToCookieHeader } = require('./credential')
 const { createLogger } = require('../../shared/logger')
 
 const logger = createLogger('qqmusic')
+
+/** 试听直链的文件名前缀 */
+const TRIAL_PREFIX = 'RS02'
+
+/** 试听直链的文件扩展名 */
+const TRIAL_EXT = '.mp3'
+
+/** 试听音质档位标识 */
+const TRIAL_LEVEL = 'trial'
+
+/** 试听音质说明 */
+const TRIAL_LABEL = '试听片段'
 
 /**
  * 音质档位候选表，按音质从高到低排列
@@ -175,10 +192,12 @@ const pickReason = (infos, payPlay) => {
  * @typedef {object} SongUrlResult
  * @property {boolean} ok 是否拿到可用直链
  * @property {string} [url] 播放地址
- * @property {string} [level] 命中的音质档位
+ * @property {string} [level] 命中的音质档位，试听直链为 trial
  * @property {string} [label] 命中音质的中文说明
  * @property {string} [format] 音频格式
  * @property {boolean} [isFallback] 是否降级到低于首选档位的音质
+ * @property {boolean} [isTrial] 是否为官方下发的试听片段直链
+ * @property {number} [payPlay] 歌曲付费标记，1 表示该歌曲需付费
  * @property {string[]} [triedLevels] 本次尝试的音质档位
  * @property {string} [reason] 失败原因
  * @property {any} [raw] 收敛后的 vkey 业务响应
@@ -186,47 +205,28 @@ const pickReason = (infos, payPlay) => {
  */
 
 /**
- * 请求一次 vkey，取回播放地址
+ * 发起一次 vkey 请求并收敛结果
  *
+ * 请求体是 `{ comm, req_0: { module, method, param } }` 的旧式结构，
+ * 与平台层其余接口的 `{ comm, request: { ... } }` 不同。
  * @param {object} options 请求选项
  * @param {string} options.mid 歌曲 mid
- * @param {string} [options.mediaMid] 媒体 mid，缺省时只用 `mid + mid` 作 base
- * @param {string} [options.level] 首选音质档位
+ * @param {Array<{ filename: string, level: string }>} options.entries 上报的候选文件列表
  * @param {string} [options.uin] 登录账号 ID
  * @param {Record<string, string>} [options.cookies] 登录凭据
- * @param {number} [options.payPlay] 歌曲付费标记，1 表示该歌曲需付费
  * @param {number} [options.timeoutMs] 请求超时毫秒数
- * @returns {Promise<SongUrlResult>} 播放地址解析结果
+ * @returns {Promise<{ infos: any[], sip: string, raw: any, byFilename: Map<string, any>, vkeyResults: any[] }>} 收敛后的 vkey 结果
  */
-const requestSongUrl = async (options) => {
+const postVkey = async (options) => {
   const {
     mid,
-    mediaMid = '',
-    level = 'hq',
+    entries,
     uin = '',
     cookies = {},
-    payPlay,
     timeoutMs = DEFAULT_TIMEOUT_MS,
   } = options
 
-  const bases = getBaseCandidates(mid, mediaMid)
-  const targetLevel = String(level || 'hq')
-  const candidates = getQualityCandidates(targetLevel)
-  const triedLevels = candidates.map((item) => item.level)
-
-  // 同一个请求里带上所有「档位 × base」组合，filename 与 songtype 长度必然一致。
-  // 顺序按「档位在外、base 在内」展开：同一档位先试首选 base，再试兜底 base，
-  // 这样只要任一 base 能给到该档位就命中，返回的始终是最高可用音质。
-  const requests = []
-  for (const candidate of candidates) {
-    for (const base of bases) {
-      requests.push({
-        filename: `${candidate.prefix}${base}${candidate.ext}`,
-        level: candidate.level,
-      })
-    }
-  }
-  const filenames = requests.map((item) => item.filename)
+  const filenames = entries.map((item) => item.filename)
 
   const musickey = cookies.qm_keyst || cookies.qqmusic_key || ''
   const gtk = hash33(musickey, 5381)
@@ -294,15 +294,15 @@ const requestSongUrl = async (options) => {
       String(item).startsWith('http'),
     ) || 'https://isure.stream.qqmusic.qq.com/'
 
-  const infoByFilename = new Map()
+  const byFilename = new Map()
   for (const info of infos) {
-    if (info && info.filename && !infoByFilename.has(info.filename)) {
-      infoByFilename.set(info.filename, info)
+    if (info && info.filename && !byFilename.has(info.filename)) {
+      byFilename.set(info.filename, info)
     }
   }
 
-  const vkeyResults = requests.map((item) => {
-    const info = infoByFilename.get(item.filename)
+  const vkeyResults = entries.map((item) => {
+    const info = byFilename.get(item.filename)
     return {
       level: item.level,
       filename: item.filename,
@@ -311,10 +311,62 @@ const requestSongUrl = async (options) => {
     }
   })
 
-  const raw = sanitizeRaw(json, infos)
+  return { infos, sip, raw: sanitizeRaw(json, infos), byFilename, vkeyResults }
+}
+
+/**
+ * 请求一次 vkey，取回播放地址
+ *
+ * 先按「档位 × base」组合探测正式音质，全部落空时再探一次官方试听直链。
+ * @param {object} options 请求选项
+ * @param {string} options.mid 歌曲 mid
+ * @param {string} [options.mediaMid] 媒体 mid，缺省时只用 `mid + mid` 作 base
+ * @param {string} [options.level] 首选音质档位
+ * @param {string} [options.uin] 登录账号 ID
+ * @param {Record<string, string>} [options.cookies] 登录凭据
+ * @param {number} [options.payPlay] 歌曲付费标记，1 表示该歌曲需付费
+ * @param {number} [options.timeoutMs] 请求超时毫秒数
+ * @returns {Promise<SongUrlResult>} 播放地址解析结果
+ */
+const requestSongUrl = async (options) => {
+  const {
+    mid,
+    mediaMid = '',
+    level = 'hq',
+    uin = '',
+    cookies = {},
+    payPlay,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  } = options
+
+  const bases = getBaseCandidates(mid, mediaMid)
+  const targetLevel = String(level || 'hq')
+  const candidates = getQualityCandidates(targetLevel)
+  const triedLevels = candidates.map((item) => item.level)
+
+  // 同一个请求里带上所有「档位 × base」组合，filename 与 songtype 长度必然一致。
+  // 顺序按「档位在外、base 在内」展开：同一档位先试首选 base，再试兜底 base，
+  // 这样只要任一 base 能给到该档位就命中，返回的始终是最高可用音质。
+  const requests = []
+  for (const candidate of candidates) {
+    for (const base of bases) {
+      requests.push({
+        filename: `${candidate.prefix}${base}${candidate.ext}`,
+        level: candidate.level,
+      })
+    }
+  }
+
+  const outcome = await postVkey({
+    mid,
+    entries: requests,
+    uin,
+    cookies,
+    timeoutMs,
+  })
 
   for (const request of requests) {
-    const found = infoByFilename.get(request.filename)
+    const found = outcome.byFilename.get(request.filename)
     if (!found || !found.purl) continue
 
     const candidate = candidates.find((item) => item.level === request.level)
@@ -326,26 +378,69 @@ const requestSongUrl = async (options) => {
     )
     return {
       ok: true,
-      url: purl.startsWith('http') ? purl : `${sip}${purl}`,
+      url: purl.startsWith('http') ? purl : `${outcome.sip}${purl}`,
       level: candidate.level,
       label: candidate.label,
       format: candidate.ext.replace('.', ''),
       isFallback: candidate.level !== targetLevel,
+      isTrial: false,
+      payPlay,
       triedLevels,
-      raw,
-      vkeyResults,
+      raw: outcome.raw,
+      vkeyResults: outcome.vkeyResults,
     }
   }
 
-  const reason = pickReason(infos, payPlay)
+  // 正式音质拿不到时再探试听直链：付费歌由官方下发 60 秒试听片段
+  const trialBase = mediaMid || mid
+  const trialFilename = `${TRIAL_PREFIX}${trialBase}${TRIAL_EXT}`
+  const trialOutcome = await postVkey({
+    mid,
+    entries: [{ filename: trialFilename, level: TRIAL_LEVEL }],
+    uin,
+    cookies,
+    timeoutMs,
+  })
+  const trialInfo = trialOutcome.byFilename.get(trialFilename)
+  if (trialInfo && trialInfo.purl) {
+    const purl = String(trialInfo.purl)
+    logger.info(`命中试听直链: ${mid}`)
+    return {
+      ok: true,
+      url: purl.startsWith('http') ? purl : `${trialOutcome.sip}${purl}`,
+      level: TRIAL_LEVEL,
+      label: TRIAL_LABEL,
+      format: TRIAL_EXT.replace('.', ''),
+      isFallback: true,
+      isTrial: true,
+      payPlay,
+      triedLevels,
+      raw: trialOutcome.raw,
+      vkeyResults: trialOutcome.vkeyResults,
+    }
+  }
+
+  const reason = pickReason(outcome.infos, payPlay)
   logger.warn(
     `vkey 未返回可用播放地址: ${mid} 首选=${targetLevel} 原因=${reason}`,
   )
-  return { ok: false, reason, triedLevels, raw, vkeyResults }
+  return {
+    ok: false,
+    reason,
+    isTrial: false,
+    payPlay,
+    triedLevels,
+    raw: outcome.raw,
+    vkeyResults: outcome.vkeyResults,
+  }
 }
 
 module.exports = {
   QUALITY_CANDIDATES,
+  TRIAL_PREFIX,
+  TRIAL_EXT,
+  TRIAL_LEVEL,
+  TRIAL_LABEL,
   getQualityCandidates,
   getBaseCandidates,
   hash33,

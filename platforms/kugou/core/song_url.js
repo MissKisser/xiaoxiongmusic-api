@@ -10,6 +10,15 @@
  * - 两段式：VIP 高音质先由 `POST /v2/get_res_privilege/lite` 取得该档位的
  *   变体 hash（授权），再用变体 hash 请求 `GET /v5/url` 取直链。
  *
+ * 可播性判据来自 `GET /v5/url` 的响应：
+ * - `status=1`：可播，响应带直链
+ * - `status=2`：付费墙，响应带 `hash_offset`（试听边界，`end_ms` 即试听时长）
+ * - `status=3`：该账号对该资源完全无授权，响应既无直链也无 `hash_offset`
+ *
+ * `privilege` 来自官方授权接口 `POST /v2/get_res_privilege/lite` 的资源条目，
+ * 与搜索 / 歌单 / 专辑曲目上标注的是同一口径的授权位；授权接口返回空数据时，
+ * 该字段为 null，由调用方传入的 `privilege` 兜底。
+ *
  * 本模块不持有任何跨请求状态：凭据一律由调用方传入。
  */
 
@@ -43,13 +52,45 @@ const extractUrls = (response) => {
 }
 
 /**
- * 读取账号在各音质档位可用的变体 hash
+ * 从播放地址响应里取可播性判据 `status`
+ *
+ * `1` 可播 / `2` 付费墙 / `3` 该账号完全无授权。
+ * @param {any} response 酷狗网关响应
+ * @returns {number} status 值，响应里没有时返回 0
+ */
+const pickStatus = (response) => {
+  if (!response || typeof response !== 'object') return 0
+  return Number(response.status) || 0
+}
+
+/**
+ * 从播放地址响应里取试听片段边界
+ *
+ * 边界可能挂在 `hash_offset` 上，也可能挂在 `trans_param.hash_offset` 上。
+ * @param {any} response 酷狗网关响应
+ * @returns {Record<string, any> | null} 试听边界，没有时返回 null
+ */
+const pickHashOffset = (response) => {
+  if (!response || typeof response !== 'object') return null
+  if (response.hash_offset && typeof response.hash_offset === 'object') {
+    return response.hash_offset
+  }
+  const transParam = response.trans_param
+  if (transParam && transParam.hash_offset) {
+    if (typeof transParam.hash_offset === 'object')
+      return transParam.hash_offset
+  }
+  return null
+}
+
+/**
+ * 读取账号在各音质档位的授权与变体 hash
  *
  * 变体 hash 与歌曲原始 hash 不同，是酷狗用来区分音质档位的凭据。
  * @param {{ token: string, userid: string }} session 酷狗会话凭据
  * @param {string} hash 歌曲 hash
  * @param {number} albumId 专辑 ID
- * @returns {Promise<Map<string, string>>} 音质档位 → 变体 hash 的映射
+ * @returns {Promise<{ options: Map<string, string>, privilege: number | null, qualityPrivileges: Map<string, number> }>} 授权位与变体 hash 的解析结果
  */
 const fetchLiteQualityOptions = async (session, hash, albumId) => {
   const response = await kgGatewayRequest(
@@ -73,9 +114,16 @@ const fetchLiteQualityOptions = async (session, hash, albumId) => {
   )
 
   const options = new Map()
-  for (const item of response.data || []) {
+  const qualityPrivileges = new Map()
+  const data = Array.isArray(response && response.data) ? response.data : []
+
+  for (const item of data) {
     for (const variant of [item, ...(item.relate_goods || [])]) {
       const quality = variant.quality
+      const privilege = Number(variant.privilege ?? 0) || 0
+      if (quality && !qualityPrivileges.has(quality)) {
+        qualityPrivileges.set(quality, privilege)
+      }
       if (!variant.hash || variant.level === 0) continue
       if (
         !quality ||
@@ -87,7 +135,11 @@ const fetchLiteQualityOptions = async (session, hash, albumId) => {
       options.set(quality, variant.hash)
     }
   }
-  return options
+
+  // 授权接口返回空数据时给 null，交给调用方用自己的 privilege 兜底
+  const privilege = data.length > 0 ? Number(data[0].privilege ?? 0) || 0 : null
+
+  return { options, privilege, qualityPrivileges }
 }
 
 /**
@@ -157,7 +209,7 @@ const playableUrls = (response) => {
  * 按「偏好音质 → 逐档降级」的顺序尝试；VIP 档位先用授权接口换取变体 hash。
  * @param {{ token: string, userid: string }} session 酷狗会话凭据
  * @param {{ hash: string, albumId?: number, audioId?: number, level?: string, freePart?: boolean }} options 解析参数
- * @returns {Promise<{ ok: boolean, url: string, urls: string[], quality: string, requestedQuality: string, usedPrivilege: boolean, response: any }>} 解析结果
+ * @returns {Promise<{ ok: boolean, url: string, urls: string[], quality: string, requestedQuality: string, usedPrivilege: boolean, status: number, hashOffset: Record<string, any> | null, privilege: number | null, response: any }>} 解析结果
  */
 const resolveSongUrl = async (session, options) => {
   const {
@@ -176,12 +228,14 @@ const resolveSongUrl = async (session, options) => {
 
   let candidates = chain.map((quality) => ({ quality, hash }))
   let usedPrivilege = false
+  let privilege = null
 
   if (isConceptMode() && session.token) {
     try {
-      const variants = await fetchLiteQualityOptions(session, hash, albumId)
+      const lite = await fetchLiteQualityOptions(session, hash, albumId)
+      privilege = lite.privilege
       const privileged = chain
-        .map((quality) => ({ quality, variantHash: variants.get(quality) }))
+        .map((quality) => ({ quality, variantHash: lite.options.get(quality) }))
         .filter((item) => Boolean(item.variantHash))
         .map((item) => ({ quality: item.quality, hash: item.variantHash }))
       if (privileged.length > 0) {
@@ -225,6 +279,9 @@ const resolveSongUrl = async (session, options) => {
         quality: candidate.quality,
         requestedQuality,
         usedPrivilege,
+        status: pickStatus(response),
+        hashOffset: pickHashOffset(response),
+        privilege,
         response,
       }
     }
@@ -237,6 +294,9 @@ const resolveSongUrl = async (session, options) => {
     quality: requestedQuality,
     requestedQuality,
     usedPrivilege,
+    status: pickStatus(lastResponse),
+    hashOffset: pickHashOffset(lastResponse),
+    privilege,
     response: lastResponse,
   }
 }
@@ -245,6 +305,8 @@ module.exports = {
   QUALITY_LEVELS,
   QUALITY_MAP,
   extractUrls,
+  pickStatus,
+  pickHashOffset,
   fetchLiteQualityOptions,
   requestTrackUrl,
   resolveSongUrl,
