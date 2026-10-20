@@ -50,6 +50,7 @@ const { md5, stringifyParams } = require('./crypto')
  * @property {string} url 完整请求地址
  * @property {Record<string, string>} headers 请求头
  * @property {string | Buffer} body 请求体（协议 A 为 JSON 文本，协议 B 为密文字节）
+ * @property {string} [method] 请求方法（协议 A；GET 时不携带 body 与 Content-Type）
  * @property {Record<string, any>} [params] 参与签名的参数表（协议 A）
  * @property {string} [signature] 请求签名（协议 A）
  * @property {string} [aes] AES 会话串（协议 B，用于解密响应）
@@ -84,10 +85,11 @@ const randomAes = () => {
  * @param {string} path 网关相对路径
  * @param {Record<string, any>} body 业务请求体
  * @param {KgRequestContext} ctx 请求上下文
- * @param {{ params?: Record<string, any>, headers?: Record<string, string>, baseURL?: string }} [options] 附加参数、请求头与网关地址
+ * @param {{ params?: Record<string, any>, headers?: Record<string, string>, baseURL?: string, method?: 'GET' | 'POST' }} [options] 附加参数、请求头、网关地址与请求方法
  * @returns {BuiltRequest} 构造好的请求
  */
 const buildGatewayRequest = (path, body, ctx, options = {}) => {
+  const method = options.method === 'GET' ? 'GET' : 'POST'
   const merged = {
     dfid: ctx.dfid || '-',
     mid: ctx.mid,
@@ -107,7 +109,9 @@ const buildGatewayRequest = (path, body, ctx, options = {}) => {
     params[key] = value
   }
 
-  const bodyStr = JSON.stringify(body ?? {})
+  // GET 请求不携带 body，签名按空 body 计算；
+  // 带 `Content-Type: application/json` 却无 body 时网关会返回 error_code=20006。
+  const bodyStr = method === 'GET' ? '' : JSON.stringify(body ?? {})
   const signature = md5(
     `${ctx.signSalt}${stringifyParams(params)}${bodyStr}${ctx.signSalt}`,
   )
@@ -124,7 +128,7 @@ const buildGatewayRequest = (path, body, ctx, options = {}) => {
 
   const headers = {
     'User-Agent': KG_ANDROID_UA,
-    'Content-Type': 'application/json',
+    ...(method === 'GET' ? {} : { 'Content-Type': 'application/json' }),
     dfid: ctx.dfid || '-',
     clienttime: String(ctx.clienttime),
     mid: ctx.mid,
@@ -139,6 +143,7 @@ const buildGatewayRequest = (path, body, ctx, options = {}) => {
   return {
     url: `${baseURL}${path}?${query.toString()}`,
     headers,
+    method,
     body: bodyStr,
     params,
     signature,

@@ -64,7 +64,7 @@ const buildContext = (session, overrides = {}) => ({
  * 业务级 `error_code` 不会抛异常，由调用方判定；HTTP 与网络异常抛错。
  * @param {string} path 网关相对路径
  * @param {Record<string, any>} body 业务请求体
- * @param {{ params?: Record<string, any>, headers?: Record<string, string>, timeoutMs?: number, session?: any, baseURL?: string }} [options] 请求配置
+ * @param {{ params?: Record<string, any>, headers?: Record<string, string>, timeoutMs?: number, session?: any, baseURL?: string, method?: 'GET' | 'POST' }} [options] 请求配置
  * @returns {Promise<any>} 网关响应体
  */
 const kgGatewayRequest = async (path, body, options = {}) => {
@@ -74,18 +74,21 @@ const kgGatewayRequest = async (path, body, options = {}) => {
     timeoutMs = KG_DEFAULT_TIMEOUT_MS,
     session = null,
     baseURL = KG_GATEWAY_URL,
+    method = 'POST',
   } = options
 
   const built = buildGatewayRequest(path, body, buildContext(session), {
     params,
     headers,
     baseURL,
+    method,
   })
 
+  const isGet = built.method === 'GET'
   const res = await fetch(built.url, {
-    method: 'POST',
+    method: built.method,
     headers: built.headers,
-    body: built.body,
+    body: isGet ? undefined : built.body,
     signal: AbortSignal.timeout(timeoutMs),
   })
 
