@@ -9,6 +9,9 @@
  *
  * 公开读接口，不依赖登录态，免登录即可调用；调用方带了凭据时随请求透传给网关。
  *
+ * 分页口径与 QQ 音乐搜索一致：每页返回上游分页窗口原样的一页，
+ * 条数与请求的 limit 对齐，页与页之间既不重合也不跳页。
+ *
  * @param {Record<string, any>} query 调用参数
  * @param {string} query.keywords 搜索关键词
  * @param {number} [query.page] 页码，从 1 开始
@@ -259,6 +262,10 @@ const normalizeFromLegacy = (raw) => {
 
 /**
  * 走 mobilecdn 搜索歌曲
+ *
+ * 只取上游分页窗口本身：`data.info` 是上游按 `pagesize` 切好的一页，
+ * 每条附带的 `group` 是同一首歌的关联版本，不属于分页窗口，
+ * 展开它会让每页条数超过请求的 limit，也会让相邻两页出现重复条目。
  * @param {string} keywords 关键词
  * @param {number} page 页码
  * @param {number} limit 每页数量
@@ -274,15 +281,11 @@ const searchSongsMobile = async (keywords, page, limit) => {
 
   const songs = []
   const seen = new Set()
-  const push = (item) => {
+  for (const item of Array.isArray(raw) ? raw : []) {
     const key = `${item.audio_id ?? ''}_${item.hash ?? ''}`
-    if (seen.has(key)) return
+    if (seen.has(key)) continue
     seen.add(key)
     songs.push(normalizeFromMobile(item))
-  }
-  for (const item of Array.isArray(raw) ? raw : []) {
-    push(item)
-    for (const sub of item.group || []) push(sub)
   }
 
   return {
@@ -294,6 +297,9 @@ const searchSongsMobile = async (keywords, page, limit) => {
 
 /**
  * 走兜底 songsearch 搜索歌曲
+ *
+ * 与 mobilecdn 同口径：`data.lists` 是上游分页窗口本身，
+ * 每条附带的 `Grp` 是关联版本，不计入分页窗口。
  * @param {string} keywords 关键词
  * @param {number} page 页码
  * @param {number} limit 每页数量
@@ -310,15 +316,11 @@ const searchSongsLegacy = async (keywords, page, limit) => {
 
   const songs = []
   const seen = new Set()
-  const push = (item) => {
+  for (const item of Array.isArray(raw) ? raw : []) {
     const key = `${item.Audioid}_${item.FileHash}`
-    if (seen.has(key)) return
+    if (seen.has(key)) continue
     seen.add(key)
     songs.push(normalizeFromLegacy(item))
-  }
-  for (const item of Array.isArray(raw) ? raw : []) {
-    push(item)
-    for (const sub of item.Grp || []) push(sub)
   }
 
   return {
@@ -330,39 +332,81 @@ const searchSongsLegacy = async (keywords, page, limit) => {
 
 /**
  * 搜索歌曲，mobilecdn 失败时回落到 songsearch
+ *
+ * 两条通道都空、而上游声称该页仍有数据时，判定为上游偶发空结果，
+ * 再重试一次主通道；两条通道都空且上游也声称没有数据时，按真实空结果返回。
  * @param {string} keywords 关键词
  * @param {number} page 页码
  * @param {number} limit 每页数量
  * @returns {Promise<{ total: number, songs: any[], raw: any }>} 歌曲、总数与上游原始响应
  */
 const searchSongs = async (keywords, page, limit) => {
-  try {
-    const result = await searchSongsMobile(keywords, page, limit)
-    if (result.songs.length > 0) return result
-  } catch {
-    // 落到兜底通道
+  const attempt = async () => {
+    let mobile = null
+    try {
+      mobile = await searchSongsMobile(keywords, page, limit)
+    } catch {
+      mobile = null
+    }
+    if (mobile && mobile.songs.length > 0) return mobile
+
+    let legacy = null
+    try {
+      legacy = await searchSongsLegacy(keywords, page, limit)
+    } catch {
+      legacy = null
+    }
+    if (legacy && legacy.songs.length > 0) return legacy
+
+    return mobile || legacy || { total: 0, songs: [], raw: null }
   }
-  return searchSongsLegacy(keywords, page, limit)
+
+  const first = await attempt()
+  if (first.songs.length > 0) return first
+
+  if (first.total > 0) {
+    try {
+      const retry = await searchSongsMobile(keywords, page, limit)
+      if (retry.songs.length > 0) return retry
+    } catch {
+      // 重试仍失败时按空结果返回
+    }
+  }
+
+  return first
 }
 
 /**
  * 发出搜索网关请求
+ *
+ * 网关偶尔会返回「总数非零但本页列表为空」，判定为偶发空结果后重试一次。
  * @param {string} path 网关相对路径
  * @param {Record<string, any>} params 查询参数
  * @param {{ token: string, userid: string, dfid: string } | null} session 可选凭据
  * @returns {Promise<any>} 网关响应体
  */
-const searchGateway = async (path, params, session) =>
-  kgGatewayRequest(
-    path,
-    {},
-    {
-      method: 'GET',
-      params,
-      headers: { 'x-router': SEARCH_ROUTER },
-      session: session || undefined,
-    },
-  )
+const searchGateway = async (path, params, session) => {
+  const request = () =>
+    kgGatewayRequest(
+      path,
+      {},
+      {
+        method: 'GET',
+        params,
+        headers: { 'x-router': SEARCH_ROUTER },
+        session: session || undefined,
+      },
+    )
+
+  let res = await request()
+  let list = pickList(res)
+  const total = Number((res && res.data && res.data.total) || 0)
+  if (list.length === 0 && total > 0) {
+    res = await request()
+    list = pickList(res)
+  }
+  return res
+}
 
 /**
  * 从网关搜索响应里取出条目列表
@@ -399,7 +443,8 @@ const searchAlbums = async (keywords, page, limit, session) => {
     session,
   )
 
-  const albums = pickList(res).map((raw) => {
+  const list = pickList(res).slice(0, limit)
+  const albums = list.map((raw) => {
     const singerStr =
       raw.singer ||
       (raw.singers
@@ -450,14 +495,16 @@ const searchArtists = async (keywords, page, limit, session) => {
     session,
   )
 
-  const artists = pickList(res).map((raw) => ({
-    id: String(raw.AuthorId ?? ''),
-    name: decodeName(raw.AuthorName),
-    cover: fillCover(raw.Avatar || raw.FirstFrameImage, 300),
-    albumCount: raw.AlbumCount ?? 0,
-    songCount: raw.AudioCount ?? 0,
-    fansCount: raw.FansNum ?? 0,
-  }))
+  const artists = pickList(res)
+    .slice(0, limit)
+    .map((raw) => ({
+      id: String(raw.AuthorId ?? ''),
+      name: decodeName(raw.AuthorName),
+      cover: fillCover(raw.Avatar || raw.FirstFrameImage, 300),
+      albumCount: raw.AlbumCount ?? 0,
+      songCount: raw.AudioCount ?? 0,
+      fansCount: raw.FansNum ?? 0,
+    }))
 
   const data = (res && res.data) || {}
   return {
@@ -488,14 +535,16 @@ const searchPlaylists = async (keywords, page, limit, session) => {
     session,
   )
 
-  const playlists = pickList(res).map((raw) => ({
-    id: String(raw.specialid || raw.gid || ''),
-    name: decodeName(raw.specialname),
-    cover: fillCover(raw.img, 300),
-    creator: decodeName(raw.nickname),
-    trackCount: raw.song_count ?? 0,
-    playCount: Number(raw.play_count || raw.total_play_count || 0),
-  }))
+  const playlists = pickList(res)
+    .slice(0, limit)
+    .map((raw) => ({
+      id: String(raw.specialid || raw.gid || ''),
+      name: decodeName(raw.specialname),
+      cover: fillCover(raw.img, 300),
+      creator: decodeName(raw.nickname),
+      trackCount: raw.song_count ?? 0,
+      playCount: Number(raw.play_count || raw.total_play_count || 0),
+    }))
 
   const data = (res && res.data) || {}
   return {
