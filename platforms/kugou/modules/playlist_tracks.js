@@ -24,6 +24,7 @@ const { extractSongTitle, extractEntryTitle } = require('../core/song_title')
 const {
   success,
   badRequest,
+  failure,
   unauthorized,
   upstreamError,
 } = require('../../shared/response')
@@ -62,21 +63,88 @@ const waitListSongs = async (session, listid, predicate) => {
  * 归一化歌曲条目
  *
  * 歌名按写侧口径剥离成纯歌名：去掉歌手前缀与音频扩展名，与读侧展示一致。
+ * `mixSongId` 是歌曲的逻辑 id（`album_audio_id` 口径），同一首歌的不同文件版本
+ * （不同内容哈希、不同音质）共享同一个逻辑 id，删歌时按它定位歌单里的条目最可靠；
+ * `singer` 是歌手名，作为内容哈希与逻辑 id 都匹配不上时的兜底判据。
  * @param {any} song 原始歌曲条目
- * @returns {{ hash: string, name: string, albumId: number, mixsongId: number, fileId: string }} 归一化结果
+ * @returns {{ hash: string, name: string, singer: string, albumId: number, mixsongId: number, fileId: string }} 归一化结果
  */
 const normalizeSong = (song) => {
   const rawName = String(song.name || '').trim()
+  const artists = Array.isArray(song.artists) ? song.artists : []
+  const singer = artists
+    .map((artist) => (artist && artist.name) || '')
+    .filter(Boolean)
+    .join(' / ')
   return {
     hash: String(song.hash || '')
       .trim()
       .toUpperCase(),
     name: extractEntryTitle(song, { nameFields: ['name'] }) || rawName,
+    singer,
     albumId: Number(song.album_id || 0),
     mixsongId: Number(song.mixsongid || 0),
     fileId: String(song.fileid || ''),
   }
 }
+
+/**
+ * 在歌单曲目中按歌曲逻辑 id 或内容哈希定位目标歌曲
+ *
+ * 定位口径按可靠性排序：
+ * 1. 歌曲逻辑 id（`mixsongid`，`album_audio_id` 口径）：同一首歌在酷狗有多个文件
+ *    版本（不同音质 / 不同来源），各版本共享同一个逻辑 id，只有内容哈希不同，
+ *    因此逻辑 id 是跨版本最可靠的判据；
+ * 2. 内容哈希（`hash`，大小写不敏感）：同一文件版本的精确匹配。
+ * @param {any[]} items 歌单曲目
+ * @param {{ hash: string, mixsongId: number }} song 待定位的写操作条目
+ * @returns {any} 命中的曲目，未命中时返回 undefined
+ */
+const locateRowByKey = (items, song) => {
+  if (song.mixsongId > 0) {
+    const hit = items.find(
+      (row) => Number(row.mixsongid || 0) === song.mixsongId,
+    )
+    if (hit) return hit
+  }
+  return items.find((row) => String(row.hash || '').toUpperCase() === song.hash)
+}
+
+/**
+ * 在歌单曲目中按歌名与歌手定位目标歌曲
+ *
+ * 作为逻辑 id 与内容哈希都落空时的兜底：同一首歌在不同文件版本下的歌名与歌手一致。
+ * @param {any[]} items 歌单曲目
+ * @param {{ name: string, singer: string }} song 待定位的写操作条目
+ * @returns {any} 命中的曲目，未命中时返回 undefined
+ */
+const locateRowByTitle = (items, song) => {
+  if (!song.name) return undefined
+  return items.find((row) => {
+    if (extractEntryTitle(row, { nameFields: ['name'] }) !== song.name) {
+      return false
+    }
+    if (!song.singer) return true
+    const rowSinger = String(row.singername || '').trim()
+    return !rowSinger || rowSinger === song.singer
+  })
+}
+
+/**
+ * 判断歌单曲目里是否仍有目标条目
+ *
+ * 删后回查用：跨版本删除时请求里的哈希本就不在歌单里，
+ * 拿请求哈希回查会误判成「已删除」。
+ * @param {any[]} items 歌单曲目
+ * @param {{ mixsongid: number, hash: string }} row 目标条目
+ * @returns {boolean} 是否仍存在
+ */
+const isTargetPresent = (items, row) =>
+  items.some(
+    (item) =>
+      (row.mixsongid > 0 && Number(item.mixsongid || 0) === row.mixsongid) ||
+      (!!row.hash && String(item.hash || '').toUpperCase() === row.hash),
+  )
 
 /**
  * 往歌单加歌 / 从歌单删歌
@@ -98,7 +166,7 @@ module.exports = async (query = {}) => {
     return badRequest('songs 中存在缺少 hash 的条目')
   }
   // 酷狗加歌接口要求携带歌名，歌名为空会被服务端以 error_code=20010 拒绝；
-  // 删歌按 hash 定位目标歌曲，不需要歌名
+  // 删歌优先按歌曲逻辑 id 定位，歌名与歌手只作兜底，不做必填校验
   if (op === 'add' && songs.some((song) => !song.name)) {
     return badRequest('songs 中存在缺少 name 的条目')
   }
@@ -179,11 +247,7 @@ module.exports = async (query = {}) => {
     let after
     try {
       after = await waitListSongs(session, listid, (items) =>
-        songs.every((song) =>
-          items.some(
-            (row) => String(row.hash || '').toUpperCase() === song.hash,
-          ),
-        ),
+        songs.every((song) => Boolean(locateRowByKey(items, song))),
       )
     } catch (err) {
       logger.warn('加歌后读回失败：', err.message || err)
@@ -192,12 +256,7 @@ module.exports = async (query = {}) => {
       )
     }
 
-    const missing = songs.filter(
-      (song) =>
-        !after.items.some(
-          (row) => String(row.hash || '').toUpperCase() === song.hash,
-        ),
-    )
+    const missing = songs.filter((song) => !locateRowByKey(after.items, song))
     if (missing.length > 0) {
       return upstreamError(`加歌后读回校验失败：缺少 ${missing.length} 首`)
     }
@@ -211,20 +270,17 @@ module.exports = async (query = {}) => {
     })
   }
 
-  // 删歌要按歌单里的 fileid 定位歌曲；上游读取有复制延迟，
-  // 读到旧快照时歌里还没有这首歌，这里重试等上游视图追上来
-  const hashesNeedingLookup = songs
-    .filter((song) => !song.fileId)
-    .map((song) => song.hash)
-
+  // 删歌要按歌单里的 fileid 定位歌曲。
+  // 定位口径：歌曲逻辑 id（mixsongid）> 内容哈希（hash，大小写不敏感）> 歌名 + 歌手。
+  // 同一首歌在酷狗有多个文件版本，用户当年加入「我喜欢」时的文件与现在拿到的
+  // 文件内容哈希可能不同，只按哈希精确匹配会永远定位不到，
+  // 那种情况不是「读取延迟」，而是「版本不匹配」。
   let before
   try {
     before = await waitListSongs(session, listid, (items) =>
-      hashesNeedingLookup.every((hash) => {
-        const hit = items.find(
-          (row) => String(row.hash || '').toUpperCase() === hash,
-        )
-        return Boolean(hit && hit.fileid)
+      songs.every((song) => {
+        if (Number(song.fileId || 0) > 0) return true
+        return Boolean(locateRowByKey(items, song))
       }),
     )
   } catch (err) {
@@ -233,21 +289,39 @@ module.exports = async (query = {}) => {
   }
 
   const fileIds = []
+  /** 实际定位到的歌单条目，用于删后按同一口径回查 */
+  const targeted = []
+  const missing = []
   for (let index = 0; index < songs.length; index += 1) {
     const song = songs[index]
     if (song.fileId) {
       fileIds.push(Number(song.fileId))
       continue
     }
-    const hit = before.items.find(
-      (row) => String(row.hash || '').toUpperCase() === song.hash,
-    )
+    const hit =
+      locateRowByKey(before.items, song) || locateRowByTitle(before.items, song)
     if (!hit || !hit.fileid) {
-      return upstreamError(
-        `删歌失败：未能定位歌曲的 fileid（上游歌单曲目读取延迟），请重试：${song.hash}`,
-      )
+      missing.push(song.hash)
+      continue
     }
     fileIds.push(Number(hit.fileid))
+    targeted.push({
+      mixsongid: Number(hit.mixsongid || 0),
+      hash: String(hit.hash || '').toUpperCase(),
+    })
+  }
+  if (missing.length > 0) {
+    // 区分两种失败原因：上游曲目尚未读取完整（重试可能成功）与歌单里确实没有这首歌
+    const incomplete = before.items.length < before.count
+    if (incomplete) {
+      return upstreamError(
+        `删歌失败：上游歌单曲目尚未读取完整（已读到 ${before.items.length}/${before.count} 首），请重试：${missing.join(', ')}`,
+      )
+    }
+    return failure(404, {
+      code: 404,
+      message: `删歌失败：未在该歌单中找到该歌曲（已按歌曲 id、内容哈希、歌名匹配）：${missing.join(', ')}`,
+    })
   }
 
   let body
@@ -287,12 +361,7 @@ module.exports = async (query = {}) => {
   let after
   try {
     after = await waitListSongs(session, listid, (items) =>
-      songs.every(
-        (song) =>
-          !items.some(
-            (row) => String(row.hash || '').toUpperCase() === song.hash,
-          ),
-      ),
+      targeted.every((row) => !isTargetPresent(items, row)),
     )
   } catch (err) {
     logger.warn('删歌后读回失败：', err.message || err)
@@ -301,11 +370,7 @@ module.exports = async (query = {}) => {
     )
   }
 
-  const still = songs.filter((song) =>
-    after.items.some(
-      (row) => String(row.hash || '').toUpperCase() === song.hash,
-    ),
-  )
+  const still = targeted.filter((row) => isTargetPresent(after.items, row))
   if (still.length > 0) {
     return upstreamError(`删歌后读回校验失败：仍有 ${still.length} 首`)
   }
