@@ -9,6 +9,11 @@
  * 除对外处理函数外，本模块还导出同目录写操作模块复用的内部工具 readListSongs，
  * 供加歌、删歌后的读回校验复用同一套协议细节。
  *
+ * 顺序口径：上游 `/v4/get_list_all_file` 的默认序是「添加时间升序」（先加的在前），
+ * 官方客户端显示的却是歌单内的位置序——每个条目自带 `sort` 位置下标，
+ * 新加入的曲目位置最靠前。同批导入的曲目添加时间完全相同，
+ * 只按添加时间排还原不出官方顺序，因此这里按位置下标还原。
+ *
  * 歌名口径：歌名剥离规则由 `../core/song_title` 统一提供，与公开歌单、加歌
  * 写入三处共用同一实现，同一首歌在任何页面显示的都是同一个名字。
  */
@@ -81,6 +86,64 @@ const readListSongs = async (
 
 /** 封面链接里尺寸占位符 `{size}` 的替换值 */
 const COVER_SIZE = 300
+
+/**
+ * 按官方客户端的显示顺序排列曲目
+ *
+ * 官方客户端按歌单内的位置下标（条目自带的 `sort`）显示曲目，
+ * 位置 0 是最靠前的一首，新加入的曲目落在最前面。
+ * 上游没有给位置下标时保持上游原序，不擅自改变语义。
+ * @param {any[]} items 上游返回的曲目条目
+ * @returns {any[]} 按官方位置序排列的曲目条目
+ */
+const sortByOfficialOrder = (items) => {
+  const positions = items.map((item) => {
+    const value = item ? item.sort : undefined
+    if (value === undefined || value === null || value === '') return NaN
+    return Number(value)
+  })
+  if (positions.some((value) => !Number.isFinite(value))) return items
+  const order = items.map((_, index) => index)
+  order.sort((a, b) => positions[a] - positions[b] || a - b)
+  return order.map((index) => items[index])
+}
+
+/**
+ * 读取一个云歌单的全部曲目，并按官方客户端的显示顺序排列
+ *
+ * 上游分页按「添加时间」切分，与官方显示序不是一回事，
+ * 还原官方顺序必须把整个歌单取回来再排，之后按位置序切页。
+ * 上游在分页边界可能重复同一条目，这里按内容哈希去重。
+ * @param {any} session 酷狗会话凭据
+ * @param {string} listid 歌单 listid
+ * @returns {Promise<{ items: any[], count: number }>} 曲目条目与歌曲总数
+ */
+const readListSongsInOfficialOrder = async (session, listid) => {
+  const collected = []
+  const seen = new Set()
+  let count = 0
+  let totalPages = 1
+
+  for (let page = 1; page <= totalPages; page += 1) {
+    const result = await readListSongs(session, listid, page, MAX_PAGE_SIZE)
+    count = result.count || count
+    totalPages = Math.max(1, Math.ceil(count / MAX_PAGE_SIZE))
+    for (const item of result.items) {
+      const key = String((item && item.hash) || '')
+      if (key) {
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
+      collected.push(item)
+    }
+    if (!result.items.length) break
+  }
+
+  return {
+    items: sortByOfficialOrder(collected),
+    count: count || collected.length,
+  }
+}
 
 /**
  * 从歌曲条目里取出纯歌名
@@ -187,11 +250,16 @@ module.exports = async (query = {}) => {
 
   let result
   try {
-    result = await readListSongs(session, listid, page, pageSize)
+    result = await readListSongsInOfficialOrder(session, listid)
   } catch (err) {
     logger.warn('读取歌单歌曲失败：', err.message || err)
     return upstreamError(`读取歌单歌曲失败：${err.message || err}`)
   }
+
+  // 官方显示序是整张歌单的位置序，分页要按排好序的全量切页，
+  // 否则翻页会与上游的添加时间序错位
+  const offset = (page - 1) * pageSize
+  const songs = result.items.slice(offset, offset + pageSize)
 
   // 收藏歌单的曲目在源歌单里：本地收藏号在云歌单命名空间下查不到曲目，
   // 此时按源歌单标识解析；源歌单是公开歌单时走公开歌单通道读取。
@@ -272,8 +340,10 @@ module.exports = async (query = {}) => {
     page,
     pageSize,
     total: result.count || result.items.length,
-    songs: result.items.map(mapSong),
+    songs: songs.map(mapSong),
   })
 }
 
 module.exports.readListSongs = readListSongs
+module.exports.readListSongsInOfficialOrder = readListSongsInOfficialOrder
+module.exports.sortByOfficialOrder = sortByOfficialOrder
