@@ -35,6 +35,21 @@ const ALBUM_BATCH_SIZE = 50
 /** 专辑信息批量请求的并发上限 */
 const ALBUM_CONCURRENCY = 4
 
+/**
+ * 解析源歌单的全局标识
+ *
+ * `global_specialid` 形如 `collection_3_<源用户id>_<源云歌单号>_0`，
+ * 其中第三段是源歌单作者、第四段是源歌单在该作者账号下的云歌单号。
+ * 这两个值才是上游认可的「源歌单身份」：直接拿精选号当云歌单号提交，
+ * 上游会以 error_code=30203 拒收。
+ * @param {string} globalSpecialid 源歌单全局标识
+ * @returns {{ userid: string, listid: string }} 源歌单作者与云歌单号
+ */
+const parseGlobalSpecialid = (globalSpecialid) => {
+  const parts = String(globalSpecialid || '').split('_')
+  return { userid: parts[2] || '', listid: parts[3] || '' }
+}
+
 /** HTML 实体表 */
 const ENTITY_MAP = {
   '&nbsp;': ' ',
@@ -304,6 +319,86 @@ const normalizeSpecialSong = (raw, fallbackCover, albums) => {
  * @param {Record<string, any>} [query] 调用参数，cookie 已由平台注册表解析
  * @returns {Promise<{ status: number, body: any, cookie: string[] }>} 统一响应
  */
+/**
+ * 读取酷狗公开歌单
+ *
+ * 收藏歌单的源歌单是公开歌单时，「我的歌单」详情据此解析源歌单曲目，
+ * 故这里把读取逻辑单独导出，供公开歌单模块与「我的歌单」模块共用。
+ * @param {string} specialId 公开歌单号
+ * @param {number} page 页码，从 1 开始
+ * @param {number} pageSize 每页数量
+ * @param {any} session 酷狗会话凭据，可为空
+ * @returns {Promise<any>} 歌单头部与曲目
+ */
+const readPublicPlaylist = async (specialId, page, pageSize, session) => {
+  const infoResponse = await kgRequest(
+    `http://mobilecdn.kugou.com/api/v3/special/info?specialid=${encodeURIComponent(specialId)}&format=json`,
+  )
+  const info = infoResponse.data || {}
+
+  const songsResponse = await kgRequest(
+    `http://mobilecdn.kugou.com/api/v3/special/song?specialid=${encodeURIComponent(specialId)}&page=${page}&pagesize=${pageSize}&format=json`,
+  )
+  const songs = (songsResponse.data && songsResponse.data.info) || []
+  const total = Number(
+    (songsResponse.data && songsResponse.data.total) || songs.length,
+  )
+
+  const coverTemplate = info.imgurl || ''
+
+  const globalSpecialid = String(info.global_specialid || '')
+  const source = parseGlobalSpecialid(globalSpecialid)
+
+  // 歌曲条目不带专辑名，按 album_id 批量反查
+  const albumIds = [
+    ...new Set(
+      songs.map((song) => String(song.album_id || '')).filter(Boolean),
+    ),
+  ]
+  let albums = new Map()
+  try {
+    albums = await resolveAlbums(albumIds, session)
+  } catch (err) {
+    logger.warn('解析歌单专辑信息失败：', err.message || err)
+  }
+
+  return {
+    id: String(info.specialid || specialId),
+    name: decodeName(info.specialname),
+    description: decodeName(info.intro),
+    creator: decodeName(info.nickname),
+    creatorId: info.suid === undefined ? '' : String(info.suid),
+    cover: fillCover(coverTemplate, 300),
+    coverOriginal: fillCover(coverTemplate, 480),
+    playCount: Number(info.playcount || 0),
+    collectCount: Number(info.collectcount || 0),
+    commentCount: Number(info.commentcount || 0),
+    publishTime: info.publishtime || '',
+    tags: (Array.isArray(info.tags) ? info.tags : []).map((tag) => ({
+      id: String(tag.tagid || ''),
+      name: tag.tagname || '',
+    })),
+    total: Number(info.songcount || total || songs.length),
+    /** 源歌单的全局标识 `collection_3_<源用户id>_<源云歌单号>_0` */
+    globalSpecialid,
+    /** 源歌单在源账号下的云歌单号 */
+    sourceListid: source.listid,
+    /** 源歌单作者 userid */
+    sourceUserid: source.userid,
+    /** 歌单涉及的专辑，按专辑 ID 索引 */
+    albums: [...albums.entries()].map(([albumId, album]) => ({
+      id: albumId,
+      name: album.name,
+      cover: album.cover,
+    })),
+    songs: songs.map((song) =>
+      normalizeSpecialSong(song, coverTemplate, albums),
+    ),
+    /** 上游原始响应 */
+    raw: { info, songs },
+  }
+}
+
 module.exports = async (query = {}) => {
   const specialId = String(
     query.id || query.specialid || query.special_id || '',
@@ -320,72 +415,27 @@ module.exports = async (query = {}) => {
     ),
   )
 
-  let info
-  let songs
-  let total
+  let detail
 
   try {
-    const infoResponse = await kgRequest(
-      `http://mobilecdn.kugou.com/api/v3/special/info?specialid=${encodeURIComponent(specialId)}&format=json`,
-    )
-    info = infoResponse.data || {}
-
-    const songsResponse = await kgRequest(
-      `http://mobilecdn.kugou.com/api/v3/special/song?specialid=${encodeURIComponent(specialId)}&page=${page}&pagesize=${pageSize}&format=json`,
-    )
-    songs = (songsResponse.data && songsResponse.data.info) || []
-    total = Number(
-      (songsResponse.data && songsResponse.data.total) || songs.length,
+    detail = await readPublicPlaylist(
+      specialId,
+      page,
+      pageSize,
+      readSession(query),
     )
   } catch (err) {
     logger.warn('读取公开歌单失败：', err.message || err)
     return upstreamError(`读取公开歌单失败：${err.message || err}`)
   }
 
-  const coverTemplate = info.imgurl || ''
-
-  // 歌曲条目不带专辑名，按 album_id 批量反查
-  const albumIds = [
-    ...new Set(
-      songs.map((song) => String(song.album_id || '')).filter(Boolean),
-    ),
-  ]
-  let albums = new Map()
-  try {
-    albums = await resolveAlbums(albumIds, readSession(query))
-  } catch (err) {
-    logger.warn('解析歌单专辑信息失败：', err.message || err)
-  }
-
   return success({
     code: 200,
-    id: String(info.specialid || specialId),
-    name: decodeName(info.specialname),
-    description: decodeName(info.intro),
-    creator: decodeName(info.nickname),
-    creatorId: info.suid === undefined ? '' : String(info.suid),
-    cover: fillCover(coverTemplate, 300),
-    coverOriginal: fillCover(coverTemplate, 480),
-    playCount: Number(info.playcount || 0),
-    collectCount: Number(info.collectcount || 0),
-    commentCount: Number(info.commentcount || 0),
-    publishTime: info.publishtime || '',
-    tags: (Array.isArray(info.tags) ? info.tags : []).map((tag) => ({
-      id: String(tag.tagid || ''),
-      name: tag.tagname || '',
-    })),
+    ...detail,
     page,
     pageSize,
-    total: Number(info.songcount || total || songs.length),
-    /** 歌单涉及的专辑，按专辑 ID 索引 */
-    albums: [...albums.entries()].map(([albumId, album]) => ({
-      id: albumId,
-      name: album.name,
-      cover: album.cover,
-    })),
-    songs: songs.map((song) =>
-      normalizeSpecialSong(song, coverTemplate, albums),
-    ),
-    raw: { info, songs },
   })
 }
+
+module.exports.readPublicPlaylist = readPublicPlaylist
+module.exports.parseGlobalSpecialid = parseGlobalSpecialid

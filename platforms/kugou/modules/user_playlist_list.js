@@ -1,7 +1,7 @@
 /**
  * 酷狗音乐「我的歌单」列表
  *
- * 走概念版 cloudlist 网关路由，读取当前账号下的自建歌单与收藏歌单。
+ * 走 cloudlist 网关路由（客户端标识跟随当前登录模式），读取当前账号下的自建歌单与收藏歌单。
  * 目录语义：type=0 自建，type=1 收藏；is_def=1 默认收藏，is_def=2「我喜欢」。
  *
  * 除对外处理函数外，本模块还导出同目录写操作模块复用的内部工具，
@@ -83,15 +83,21 @@ const readMyLists = async (session) => {
 
 /**
  * 把歌单条目映射为对外结构
+ *
+ * 收藏歌单（type=1）在「我的歌单」里只是一条**收藏记录**：
+ * `listid` 是本地收藏号，云歌单接口按这个号查不到曲目，曲目在源歌单里。
+ * 源歌单有两个标识：`list_create_listid` 是源歌单在源账号下的云歌单号，
+ * `musiclib_id` 是源歌单的精选号；公开歌单通道按精选号取曲目。
  * @param {any} item 酷狗歌单条目
+ * @param {boolean} subscribed 是否为收藏歌单
  * @returns {any} 对外歌单对象
  */
-const mapPlaylist = (item) => {
+const mapPlaylist = (item, subscribed) => {
   const isDef = Number(item.is_def || 0)
   return {
     listid: String(item.listid || ''),
     name: item.name || '',
-    type: Number(item.type || 0),
+    type: Number(item.type || (subscribed ? 1 : 0)),
     count: Number(item.count || 0),
     creator: item.list_create_username || '',
     cover: item.pic || '',
@@ -100,6 +106,18 @@ const mapPlaylist = (item) => {
     updateTime: Number(item.update_time || 0),
     isDef,
     isDefault: isDef > 0,
+    /** 是否为收藏（订阅）歌单 */
+    subscribed,
+    /** 源歌单号（收藏歌单才有） */
+    originListid: String(item.list_create_listid || ''),
+    /** 源歌单作者 userid（收藏歌单才有） */
+    originUserid: String(item.list_create_userid || ''),
+    /** 源歌单的 gid（收藏歌单才有） */
+    originGid: String(item.list_create_gid || ''),
+    /** 收藏记录的全局标识（收藏歌单才有） */
+    globalCollectionId: String(item.global_collection_id || ''),
+    /** 源歌单的精选号（收藏歌单才有，读源歌单曲目的键） */
+    originSpecialid: String(item.musiclib_id || ''),
   }
 }
 
@@ -134,8 +152,8 @@ module.exports = async (query = {}) => {
     listCount: snapshot.listCount || owned.length,
     collectCount: snapshot.collectCount || favorites.length,
     albumCount: snapshot.albumCount,
-    owned: owned.map(mapPlaylist),
-    favorites: favorites.map(mapPlaylist),
+    owned: owned.map((item) => mapPlaylist(item, false)),
+    favorites: favorites.map((item) => mapPlaylist(item, true)),
   })
 }
 

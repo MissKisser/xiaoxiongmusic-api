@@ -20,10 +20,7 @@ const {
   KG_AES_ALPHABET,
   KG_ANDROID_UA,
   KG_CLOUDLIST_ROUTER,
-  KG_CLOUD_APPID,
-  KG_CLOUD_CLIENTVER,
   KG_CLOUD_PUBLIC_KEY,
-  KG_CLOUD_SIGN_SALT,
   KG_GATEWAY_URL,
 } = require('./config')
 
@@ -36,6 +33,7 @@ const { md5, stringifyParams } = require('./crypto')
  * @property {number} appid 客户端标识
  * @property {number} clientver 客户端版本号
  * @property {string} signSalt 签名盐值
+ * @property {string} [publicKey] RSA 公钥（协议 B 传参用，缺省时用概念版公钥）
  * @property {string} mid 设备 MID（十进制字符串）
  * @property {string} dfid 设备指纹
  * @property {string} userid 账号 ID
@@ -153,7 +151,9 @@ const buildGatewayRequest = (path, body, ctx, options = {}) => {
 /**
  * 构造协议 B 请求：RSA 传参 + AES-128-CBC 加密 body
  *
- * 协议 B 的标识固定取概念版：cloudlist 集群只受理概念版请求。
+ * 客户端标识、签名盐值与 RSA 公钥都取自请求上下文，
+ * 与协议 A 及读模块保持同一套（概念版 / 标准版）标识；
+ * 公钥不匹配时网关无法解出 `p`。
  * @param {string} path 网关相对路径
  * @param {Record<string, any>} body 业务请求体
  * @param {KgRequestContext} ctx 请求上下文
@@ -164,14 +164,17 @@ const buildCloudRequest = (path, body, ctx, options = {}) => {
   const aes = randomAes()
   const { key, iv } = deriveAesKey(aes)
 
-  const appid = KG_CLOUD_APPID
-  const clientver = KG_CLOUD_CLIENTVER
+  const appid = ctx.appid
+  const clientver = ctx.clientver
   const keyParam = md5(
-    `${appid}${KG_CLOUD_SIGN_SALT}${clientver}${ctx.clienttime}`,
+    `${appid}${ctx.signSalt}${clientver}${ctx.clienttime}`,
   ).toLowerCase()
 
   const p = publicEncrypt(
-    { key: KG_CLOUD_PUBLIC_KEY, padding: constants.RSA_PKCS1_PADDING },
+    {
+      key: ctx.publicKey || KG_CLOUD_PUBLIC_KEY,
+      padding: constants.RSA_PKCS1_PADDING,
+    },
     Buffer.from(
       JSON.stringify({ aes, uid: ctx.userid, token: ctx.token }),
       'utf8',

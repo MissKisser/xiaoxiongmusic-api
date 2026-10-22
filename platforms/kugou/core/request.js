@@ -10,13 +10,11 @@
  */
 
 const {
-  KG_CLOUD_APPID,
-  KG_CLOUD_CLIENTVER,
-  KG_CLOUD_SIGN_SALT,
   KG_DEFAULT_TIMEOUT_MS,
   KG_GATEWAY_URL,
   getKgAppid,
   getKgClientver,
+  getPublicKey,
   getSignSalt,
 } = require('./config')
 
@@ -50,6 +48,7 @@ const buildContext = (session, overrides = {}) => ({
   appid: getKgAppid(),
   clientver: getKgClientver(),
   signSalt: getSignSalt(),
+  publicKey: getPublicKey(),
   mid: getDeviceMid(),
   dfid: (session && session.dfid) || '-',
   userid: session && session.userid ? String(session.userid) : '',
@@ -117,16 +116,9 @@ const kgCloudRequest = async (path, body, options = {}) => {
     throw new Error('酷狗未登录：协议 B 需要同时提供 token 与 userid')
   }
 
-  const built = buildCloudRequest(
-    path,
-    body,
-    buildContext(session, {
-      appid: KG_CLOUD_APPID,
-      clientver: KG_CLOUD_CLIENTVER,
-      signSalt: KG_CLOUD_SIGN_SALT,
-    }),
-    { baseURL },
-  )
+  const built = buildCloudRequest(path, body, buildContext(session), {
+    baseURL,
+  })
 
   const res = await fetch(built.url, {
     method: 'POST',

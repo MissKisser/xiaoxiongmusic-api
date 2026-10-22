@@ -1,7 +1,10 @@
 /**
  * 酷狗音乐歌单歌曲列表
  *
- * 走概念版 cloudlist 网关路由，读取指定云歌单中的歌曲。
+ * 走 cloudlist 网关路由，读取指定云歌单中的歌曲。
+ *
+ * 客户端标识跟随当前登录模式：登录 token 与客户端标识绑定，用另一套标识
+ * 签名会被网关以 error_code=20017 拒收。
  *
  * 除对外处理函数外，本模块还导出同目录写操作模块复用的内部工具 readListSongs，
  * 供加歌、删歌后的读回校验复用同一套协议细节。
@@ -22,6 +25,8 @@ const {
 } = require('../../shared/response')
 const { createLogger } = require('../../shared/logger')
 const { businessError } = require('./user_playlist_list')
+const { readMyLists } = require('./user_playlist_list')
+const publicPlaylist = require('./playlist')
 
 const logger = createLogger('kugou')
 
@@ -186,6 +191,79 @@ module.exports = async (query = {}) => {
   } catch (err) {
     logger.warn('读取歌单歌曲失败：', err.message || err)
     return upstreamError(`读取歌单歌曲失败：${err.message || err}`)
+  }
+
+  // 收藏歌单的曲目在源歌单里：本地收藏号在云歌单命名空间下查不到曲目，
+  // 此时按源歌单标识解析；源歌单是公开歌单时走公开歌单通道读取。
+  if (!result.items.length) {
+    let collected = null
+    try {
+      const snapshot = await readMyLists(session)
+      collected =
+        snapshot.items.find(
+          (item) =>
+            Number(item.type || 0) === 1 &&
+            String(item.listid || '') === listid,
+        ) || null
+    } catch (err) {
+      logger.warn('定位收藏记录失败：', err.message || err)
+    }
+
+    if (collected) {
+      // 收藏记录在云歌单命名空间下没有曲目，曲目在源歌单里；
+      // 源歌单的精选号在 musiclib_id 上，公开歌单通道按精选号取曲目
+      const sourceId = String(collected.musiclib_id || '')
+      const sourceUserId = String(collected.list_create_userid || '')
+      const sourceListid = String(collected.list_create_listid || '')
+      if (sourceId) {
+        try {
+          const source = await publicPlaylist.readPublicPlaylist(
+            sourceId,
+            page,
+            pageSize,
+            session,
+          )
+          if (source.songs && source.songs.length) {
+            return success({
+              code: 200,
+              id: listid,
+              page,
+              pageSize,
+              total: source.total,
+              songs: source.songs,
+              subscribed: true,
+              sourceId,
+              sourceUserId,
+              sourceListid,
+              sourceName: source.name,
+              sourceCreator: source.creator,
+              sourceCount: Number(collected.count || 0),
+              sourceReadable: true,
+            })
+          }
+        } catch (err) {
+          logger.warn('读取收藏歌单源歌单失败：', err.message || err)
+        }
+      }
+      // 源歌单不可读：如实回报，不把「读不到」当成「没有歌」
+      return success({
+        code: 200,
+        id: listid,
+        page,
+        pageSize,
+        total: 0,
+        songs: [],
+        subscribed: true,
+        sourceId,
+        sourceUserId,
+        sourceListid,
+        sourceName: collected.name || '',
+        sourceCreator: collected.list_create_username || '',
+        sourceCount: Number(collected.count || 0),
+        sourceReadable: false,
+        message: '源歌单当前不可读',
+      })
+    }
   }
 
   return success({

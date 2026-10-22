@@ -1,7 +1,7 @@
 /**
  * 酷狗音乐歌单加歌 / 删歌
  *
- * 加歌走概念版 cloudlist 的 add_song 通道，删歌走 delete_songs 通道。
+ * 加歌走 cloudlist 的 add_song 通道，删歌走 delete_songs 通道（客户端标识跟随当前登录模式）。
  * 加歌接口要求歌曲以数组形式提交（发扁平字段会被服务端拒绝），且每首歌必须
  * 带歌名，否则服务端以 error_code=20010 拒绝。
  *
@@ -35,6 +35,28 @@ const logger = createLogger('kugou')
 
 /** 单次写入的最大歌曲数 */
 const MAX_TRACKS = 200
+
+/**
+ * 等待歌单曲目满足条件
+ *
+ * 上游的曲目读取偶发返回写操作之前的旧快照，写完立刻读回可能拿到旧值，
+ * 读回校验会误判。这里在有限次数内重试，直到满足条件或用尽次数。
+ * @param {any} session 酷狗会话凭据
+ * @param {string} listid 歌单 listid
+ * @param {(items: any[]) => boolean} predicate 判定条件
+ * @returns {Promise<{ items: any[], count: number }>} 最后一次读到的曲目与总数
+ */
+const waitListSongs = async (session, listid, predicate) => {
+  let last = { items: [], count: 0 }
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    last = await readListSongs(session, listid)
+    if (predicate(last.items)) return last
+    if (attempt < 5) {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+    }
+  }
+  return last
+}
 
 /**
  * 归一化歌曲条目
@@ -156,7 +178,13 @@ module.exports = async (query = {}) => {
 
     let after
     try {
-      after = await readListSongs(session, listid)
+      after = await waitListSongs(session, listid, (items) =>
+        songs.every((song) =>
+          items.some(
+            (row) => String(row.hash || '').toUpperCase() === song.hash,
+          ),
+        ),
+      )
     } catch (err) {
       logger.warn('加歌后读回失败：', err.message || err)
       return upstreamError(
@@ -183,9 +211,22 @@ module.exports = async (query = {}) => {
     })
   }
 
+  // 删歌要按歌单里的 fileid 定位歌曲；上游读取有复制延迟，
+  // 读到旧快照时歌里还没有这首歌，这里重试等上游视图追上来
+  const hashesNeedingLookup = songs
+    .filter((song) => !song.fileId)
+    .map((song) => song.hash)
+
   let before
   try {
-    before = await readListSongs(session, listid)
+    before = await waitListSongs(session, listid, (items) =>
+      hashesNeedingLookup.every((hash) => {
+        const hit = items.find(
+          (row) => String(row.hash || '').toUpperCase() === hash,
+        )
+        return Boolean(hit && hit.fileid)
+      }),
+    )
   } catch (err) {
     logger.warn('删歌前读取歌单歌曲失败：', err.message || err)
     return upstreamError(`删歌失败：${err.message || err}`)
@@ -202,7 +243,9 @@ module.exports = async (query = {}) => {
       (row) => String(row.hash || '').toUpperCase() === song.hash,
     )
     if (!hit || !hit.fileid) {
-      return badRequest(`未在歌单中找到可删除的歌曲：${song.hash}`)
+      return upstreamError(
+        `删歌失败：未能定位歌曲的 fileid（上游歌单曲目读取延迟），请重试：${song.hash}`,
+      )
     }
     fileIds.push(Number(hit.fileid))
   }
@@ -243,7 +286,14 @@ module.exports = async (query = {}) => {
 
   let after
   try {
-    after = await readListSongs(session, listid)
+    after = await waitListSongs(session, listid, (items) =>
+      songs.every(
+        (song) =>
+          !items.some(
+            (row) => String(row.hash || '').toUpperCase() === song.hash,
+          ),
+      ),
+    )
   } catch (err) {
     logger.warn('删歌后读回失败：', err.message || err)
     return upstreamError(

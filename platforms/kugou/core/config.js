@@ -3,11 +3,13 @@
  *
  * 这里的取值直接决定签名结果，改动会让平台侧请求全部失效。
  * 「概念版 / 标准版」由环境变量 `KUGOU_LOGIN_VERSION` 决定：
- * - `concept`（默认）：概念版标识，走概念版集群
- * - `standard`：标准版标识
+ * - `concept`：概念版标识，走概念版集群
+ * - `standard`（默认）：标准版标识
  *
- * 选择理由：酷狗的 cloudlist 读写只在概念版集群受理（标准版标识会返回
- * 20017 / 502），开关必须跟着协议走，不能留在客户端。
+ * 选择理由：酷狗的登录 token 与客户端标识是**绑定**的，cloudlist 的读写必须
+ * 与登录时同一套标识。用另一套标识签名，网关会以 `error_code=20017` 拒收，
+ * 「读取歌单列表」这类前置调用直接落空，依赖它们的写操作（定位「我喜欢」
+ * 歌单、加歌、删歌）随之全部失败。账号用哪套标识以登录时的那套为准。
  */
 
 /** 酷狗网关地址 */
@@ -62,10 +64,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HX
 /** 概念版开关的环境变量名 */
 const KG_LOGIN_VERSION_ENV = 'KUGOU_LOGIN_VERSION'
 
-/** 云歌单协议固定使用的概念版标识（cloudlist 集群只受理概念版） */
-const KG_CLOUD_APPID = 3116
-const KG_CLOUD_CLIENTVER = 11440
-const KG_CLOUD_SIGN_SALT = 'LnT6xpN3khm36zse0QzvmgTZ3waWdRSA'
+/** 协议 B 公钥兜底（请求上下文中未带公钥时使用） */
 const KG_CLOUD_PUBLIC_KEY = KG_CONCEPT_PROFILE.publicKey
 
 /** AES 会话串字符表 */
@@ -78,14 +77,14 @@ const KG_MID_SEED = 'splayer-next-kugou-device-mid'
 /**
  * 判断当前是否运行在概念版模式
  *
- * 未设置或取值不合法时一律按概念版处理。
+ * 未设置或取值不合法时一律按标准版处理。
  * @returns {boolean} true 表示概念版
  */
 const isConceptMode = () => {
   const raw = String(process.env[KG_LOGIN_VERSION_ENV] || '')
     .trim()
     .toLowerCase()
-  return raw !== 'standard'
+  return raw === 'concept'
 }
 
 /**
@@ -138,9 +137,6 @@ module.exports = {
   KG_CONCEPT_PROFILE,
   KG_STANDARD_PROFILE,
   KG_LOGIN_VERSION_ENV,
-  KG_CLOUD_APPID,
-  KG_CLOUD_CLIENTVER,
-  KG_CLOUD_SIGN_SALT,
   KG_CLOUD_PUBLIC_KEY,
   KG_AES_ALPHABET,
   KG_MID_SEED,
