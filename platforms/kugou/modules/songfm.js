@@ -616,3 +616,5 @@ module.exports = async (query = {}) => {
     return upstreamError(`酷狗刷歌推荐流获取失败: ${err && err.message}`)
   }
 }
+
+module.exports.normalizePoolSong = normalizePoolSong
