@@ -201,10 +201,17 @@ module.exports = async (query = {}) => {
       .map(normalizeSong)
     const albums = ((albumsData && albumsData.list) || []).map(normalizeAlbum)
 
+    // 歌手名取歌曲条目里与当前 mid 对应的那个歌手名：
+    // 合作歌曲的歌手串是「A / B」的组合，直接用会把歌手页显示成不存在的组合歌手
+    const matchedSinger = songs
+      .map((song) => (song.artists || []).find((singer) => singer.mid === mid))
+      .find(Boolean)
+
     return success({
       artist: {
         mid: (songsData && songsData.singerMid) || mid,
         name:
+          (matchedSinger && matchedSinger.name) ||
           (songs.length > 0 ? songs[0].artist : '') ||
           (albums.length > 0 ? albums[0].artist : ''),
         songCount: (songsData && songsData.totalNum) ?? songs.length,

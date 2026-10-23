@@ -108,6 +108,25 @@ const collectQualities = (raw) => {
 }
 
 /**
+ * 歌手串分隔符
+ *
+ * 酷狗用 `、`（也有 `,` `;` `/`）连接合作歌手，
+ * 不拆开会被当成一个不存在的「组合」歌手。
+ */
+const ARTIST_SEPARATORS = /、|,|;|\s*\/\s*/
+
+/**
+ * 拆分歌手串
+ * @param {string | undefined} name 歌手串
+ * @returns {string[]} 歌手名数组
+ */
+const splitArtistNames = (name) =>
+  String(name || '')
+    .split(ARTIST_SEPARATORS)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+/**
  * 归一化 mobilecdn 专辑歌曲
  * @param {any} raw 原始歌曲条目
  * @param {string} fallbackCover 兜底封面模板
@@ -137,9 +156,7 @@ const normalizeMobileSong = (raw, fallbackCover, fallbackAlbumName) => {
     hash: raw.hash || '',
     name: songName,
     artist: artistName,
-    artists: artistName
-      ? artistName.split(' / ').map((name) => ({ id: '', name }))
-      : [],
+    artists: splitArtistNames(artistName).map((name) => ({ id: '', name })),
     album: pickAlbumName(raw) || fallbackAlbumName,
     albumId: String(raw.album_id || ''),
     cover: fillCover(coverTemplate, 300),
@@ -205,7 +222,7 @@ const normalizeGatewaySong = (raw, fallbackCover, fallbackAlbumName) => {
           id: author.author_id === undefined ? '' : String(author.author_id),
           name: decodeName(author.author_name),
         }))
-      : [{ id: '', name: artistName }],
+      : splitArtistNames(artistName).map((name) => ({ id: '', name })),
     album: pickAlbumName(raw) || fallbackAlbumName,
     albumId: String(base.album_id || ''),
     cover: fillCover(coverTemplate, 300),
@@ -415,17 +432,10 @@ module.exports = async (query = {}) => {
           id: author.author_id === undefined ? '' : String(author.author_id),
           name: decodeName(author.author_name),
         }))
-      : detail.singername
-        ? [
-            {
-              id:
-                detail.singerid === undefined
-                  ? String(detail.singername)
-                  : String(detail.singerid),
-              name: decodeName(detail.singername),
-            },
-          ]
-        : [],
+      : splitArtistNames(decodeName(detail.singername)).map((name) => ({
+          id: detail.singerid === undefined ? name : String(detail.singerid),
+          name,
+        })),
     publishTime: detailIsGateway ? detail.publish_date : detail.publishtime,
     description: decodeName(detail.intro),
     language: decodeName(detail.language),
