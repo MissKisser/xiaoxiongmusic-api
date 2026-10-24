@@ -36,6 +36,12 @@ const {
   buildRefreshParam,
 } = require('./credential')
 
+const {
+  QQMusicApiError,
+  isAuthExpiredCode,
+  isQQMusicAuthExpired,
+} = require('./auth')
+
 const logger = createLogger('qqmusic')
 
 /**
@@ -199,6 +205,8 @@ const loadClientSession = async (module, credential, options = {}) => {
  * - `webComm`：强制使用网页端 comm
  * - `comm`：追加到 comm 的字段
  * - `initSession`：本次请求前是否先取一次 QQ 客户端会话
+ * - `autoRefresh`：凭据失效时是否先续期再重放一次（默认关闭）
+ * - `onRefreshed`：续期成功后的回调，参数为新的凭据 `{ uin, cookies }`
  *
  * @param {string} module 接口模块名，如 music.musicasset.PlaylistBaseRead
  * @param {string} method 接口方法名，如 GetPlaylistByUin
@@ -208,48 +216,75 @@ const loadClientSession = async (module, credential, options = {}) => {
  */
 const qmRequest = async (module, method, param, options = {}) => {
   const credential = resolveCredential(options.session)
-  const cookies = credential.cookies
-  const uin = credential.uin
-  const musickey = cookies.qm_keyst || cookies.qqmusic_key
-  const loginType = resolveLoginType(cookies, musickey)
-  const useWebComm = resolveWebComm(module, options.webComm)
 
-  const clientSession = await loadClientSession(module, credential, options)
+  /**
+   * 用一份凭据发起请求
+   * @param {{ uin: string, cookies: Record<string, string> }} current 归一化凭据
+   * @returns {Promise<any>} 接口返回的业务数据段
+   */
+  const execute = async (current) => {
+    const cookies = current.cookies
+    const uin = current.uin
+    const musickey = cookies.qm_keyst || cookies.qqmusic_key
+    const loginType = resolveLoginType(cookies, musickey)
+    const useWebComm = resolveWebComm(module, options.webComm)
 
-  const comm = {
-    ...(useWebComm ? WEB_COMM : MOBILE_COMM),
-    ...(uin && uin !== '0' ? { uin, qq: uin } : {}),
-    ...(musickey ? { authst: musickey } : {}),
-    ...(loginType ? { tmeLoginType: loginType } : {}),
-    ...(clientSession.uid ? { uid: clientSession.uid } : {}),
-    ...(clientSession.sid ? { sid: clientSession.sid } : {}),
-    ...(clientSession.userip ? { userip: clientSession.userip } : {}),
-    ...(options.comm || {}),
-  }
+    const clientSession = await loadClientSession(module, current, options)
 
-  const body = { comm, request: { module, method, param } }
+    const comm = {
+      ...(useWebComm ? WEB_COMM : MOBILE_COMM),
+      ...(uin && uin !== '0' ? { uin, qq: uin } : {}),
+      ...(musickey ? { authst: musickey } : {}),
+      ...(loginType ? { tmeLoginType: loginType } : {}),
+      ...(clientSession.uid ? { uid: clientSession.uid } : {}),
+      ...(clientSession.sid ? { sid: clientSession.sid } : {}),
+      ...(clientSession.userip ? { userip: clientSession.userip } : {}),
+      ...(options.comm || {}),
+    }
 
-  const response = await withRetry(() =>
-    postFcg(body, {
-      referer: options.referer || QM_REFERER,
-      timeoutMs: options.timeoutMs,
-      cookie: sessionToCookieHeader(cookies),
-    }),
-  )
+    const body = { comm, request: { module, method, param } }
 
-  const outerCode = response.code === undefined ? 0 : response.code
-  const innerCode =
-    response.request && response.request.code !== undefined
-      ? response.request.code
-      : 0
-
-  if (outerCode !== 0 || innerCode !== 0) {
-    throw new Error(
-      `QQ 音乐接口错误: outer=${outerCode} inner=${innerCode} module=${module} method=${method}`,
+    const response = await withRetry(() =>
+      postFcg(body, {
+        referer: options.referer || QM_REFERER,
+        timeoutMs: options.timeoutMs,
+        cookie: sessionToCookieHeader(cookies),
+      }),
     )
+
+    const outerCode = response.code === undefined ? 0 : response.code
+    const innerCode =
+      response.request && response.request.code !== undefined
+        ? response.request.code
+        : 0
+
+    if (outerCode !== 0 || innerCode !== 0) {
+      throw new QQMusicApiError({
+        outer: outerCode,
+        inner: innerCode,
+        module,
+        method,
+        authExpired: isAuthExpiredCode(module, innerCode),
+      })
+    }
+
+    return response.request ? response.request.data : undefined
   }
 
-  return response.request ? response.request.data : undefined
+  try {
+    return await execute(credential)
+  } catch (err) {
+    // 鉴权失效：续期后重放一次。
+    // refresh_key 是一次性的，接口层不保存刷新结果，只把新凭据交回调用方。
+    if (!isQQMusicAuthExpired(err) || options.autoRefresh !== true) throw err
+
+    const refreshed = await refreshQQMusicCredential(credential, options)
+    if (!refreshed.ok || !refreshed.session) throw err
+    if (typeof options.onRefreshed === 'function') {
+      options.onRefreshed(refreshed.session)
+    }
+    return await execute(refreshed.session)
+  }
 }
 
 /**
